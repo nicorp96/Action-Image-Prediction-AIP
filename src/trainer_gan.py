@@ -109,12 +109,8 @@ class Trainer:
         )
 
         # Load dataset
-        self.data_path = (
-            "/home/nrodriguez/Documents/research-image-pred/pred/data/panda_ds.npy"
-        )
-        self.save_dir = (
-            "/home/nrodriguez/Documents/research-image-pred/pred/results/gan_nm"
-        )
+        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
+        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_nm"
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
         self.data_loader = DataLoader(self.dataset, batch_size=64, shuffle=True)
 

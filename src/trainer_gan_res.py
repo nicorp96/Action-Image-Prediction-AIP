@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorAttention
+from models.generator_res import GeneratorActorRes, GeneratorActorResIm
 from models.discriminator import Discriminator2
 import torch.optim as optim
 from torchvision import transforms
@@ -11,6 +11,7 @@ import torchvision.utils as vutils
 import numpy as np
 
 
+# Initialize weights as normal distrbution
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find("Conv") != -1:
@@ -84,7 +85,7 @@ class Trainer:
         self.config_dir = config_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = 100
-        self.generator = GeneratorAttention().to(self.device)
+        self.generator = GeneratorActorResIm().to(self.device)
         self.generator.apply(weights_init)
         self.discriminator = Discriminator2().to(self.device)
         self.discriminator.apply(weights_init)
@@ -109,8 +110,8 @@ class Trainer:
         )
 
         # Load dataset
-        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/data/panda_ds_2.npy"
-        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/results/gan_att"
+        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
+        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_att"
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
         self.data_loader = DataLoader(self.dataset, batch_size=64, shuffle=True)
 
@@ -136,7 +137,7 @@ class Trainer:
                 ## Train with all-real batch
                 self.discriminator.zero_grad()
                 # Format batch
-                b_size = next_state.size(0)
+                b_size = current_state.size(0)
                 real_labels = torch.ones(current_state.size(0), device=self.device)
                 # Forward pass real batch through D
                 output = self.discriminator(next_state).view(-1)
@@ -148,10 +149,10 @@ class Trainer:
 
                 ## Train with all-fake batch
                 # Generate batch of latent vectors
-                noise = torch.randn(b_size, self.noise_dim, device=self.device)
+                noise = torch.randn(b_size, self.noise_dim, 1, 1, device=self.device)
 
                 # Generate fake image batch with G
-                fake = self.generator(noise, action)
+                fake = self.generator(noise, action, current_state)
                 fake_labels = torch.zeros(next_state.size(0), device=self.device)
                 # Classify all fake batch with D
                 output = self.discriminator(fake.detach()).view(-1)
@@ -204,7 +205,9 @@ class Trainer:
                 action_nm = action_nm.to(device=self.device)
 
                 with torch.no_grad():
-                    fake = self.generator(self.fixed_noise, action_nm)
+                    fake = self.generator(
+                        self.fixed_noise, action_nm, current_state[:5, :, :]
+                    )
                 self.save_images_actions(epoch, step, fake, action)
 
     def save_images_actions(self, epoch, step, fake_images, actions):
