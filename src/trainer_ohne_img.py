@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from models.generator import Generator
-from models.discriminator import Discriminator2
+from models.discriminator import Discriminator
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
@@ -29,7 +29,7 @@ class Trainer:
         self.noise_dim = 100
         self.generator = Generator().to(self.device)
         self.generator.apply(weights_init)
-        self.discriminator = Discriminator2().to(self.device)
+        self.discriminator = Discriminator().to(self.device)
         self.discriminator.apply(weights_init)
         self.optimizer_gen = optim.Adam(
             self.generator.parameters(), lr=0.0001, betas=(0.5, 0.9)

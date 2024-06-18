@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorActor
-from models.discriminator import Discriminator
+from models.generator import GeneratorActor, GeneratorActor2
+from models.discriminator import DiscriminatorCA2, DiscriminatorCA
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
@@ -9,6 +9,7 @@ from dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def weights_init(m):
@@ -86,7 +87,7 @@ class Trainer:
         self.noise_dim = 100
         self.generator = GeneratorActor().to(self.device)
         self.generator.apply(weights_init)
-        self.discriminator = Discriminator().to(self.device)
+        self.discriminator = DiscriminatorCA2().to(self.device)
         self.discriminator.apply(weights_init)
         self.optimizer_gen = optim.Adam(
             self.generator.parameters(), lr=0.0001, betas=(0.5, 0.9)
@@ -110,7 +111,7 @@ class Trainer:
 
         # Load dataset
         self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
-        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_nm"
+        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_d_g_cond"
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
         self.data_loader = DataLoader(self.dataset, batch_size=64, shuffle=True)
 
@@ -139,7 +140,7 @@ class Trainer:
                 b_size = next_state.size(0)
                 real_labels = torch.ones(current_state.size(0), device=self.device)
                 # Forward pass real batch through D
-                output = self.discriminator(next_state).view(-1)
+                output = self.discriminator(next_state, action).view(-1)
                 # print(output.size())
                 # print(real_labels.size())
                 # Calculate loss on all-real batch
@@ -156,7 +157,7 @@ class Trainer:
                 fake = self.generator(noise, action)
                 fake_labels = torch.zeros(next_state.size(0), device=self.device)
                 # Classify all fake batch with D
-                output = self.discriminator(fake.detach()).view(-1)
+                output = self.discriminator(fake.detach(), action).view(-1)
                 # Calculate D's loss on the all-fake batch
                 errD_fake = self.criterion(output, fake_labels)
                 # Calculate the gradients for this batch, accumulated (summed) with previous gradients
@@ -173,7 +174,7 @@ class Trainer:
                 ###########################
                 self.generator.zero_grad()
                 # Since we just updated D, perform another forward pass of all-fake batch through D
-                output = self.discriminator(fake).view(-1)
+                output = self.discriminator(fake, action).view(-1)
                 # Calculate G's loss based on this output
                 errG = self.criterion(output, real_labels)
                 # Calculate gradients for G
@@ -200,16 +201,24 @@ class Trainer:
             if not os.path.exists("results"):
                 os.makedirs("results")
             if epoch % 25 == 0:
-                action, action_nm = generate_random_actions(
+                action_r, action_nm = generate_random_actions(
                     (self.dataset.min, self.dataset.max)
                 )
                 action_nm = action_nm.to(device=self.device)
 
                 with torch.no_grad():
                     fake = self.generator(self.fixed_noise, action_nm)
-                self.save_images_actions(epoch, step, fake, action)
+                # self.save_images_actions(epoch, step, fake, action)
+                self.save_images_actions_real(
+                    epoch,
+                    step,
+                    fake,
+                    action[:5, :],
+                    next_state[:5, :, :],
+                )
 
     def save_images_actions(self, epoch, step, fake_images, actions):
+
         image_path = os.path.join(self.save_dir, f"epoch{epoch}_step{step}.png")
         action_path = os.path.join(self.save_dir, "actions")
         action_path = os.path.join(action_path, f"epoch{epoch}_step{step}.csv")
@@ -217,6 +226,47 @@ class Trainer:
         np.savetxt(
             action_path,
             actions,
+            delimiter=",",
+        )
+
+    def save_images_actions_real(self, epoch, step, fake_images, actions, real):
+        def convert_to_displayable_format(image):
+            image = np.transpose(
+                image, (1, 2, 0)
+            )  # Convert from (C, H, W) to (H, W, C)
+            image = (image - image.min()) / (
+                image.max() - image.min()
+            )  # Normalize to range [0, 1]
+            return image
+
+        # Plotting
+        fig, axes = plt.subplots(nrows=2, ncols=8, figsize=(20, 5))
+        img_fake_np = fake_images.detach().cpu().numpy()
+        img_real_np = real.detach().cpu().numpy()
+        image_path = os.path.join(self.save_dir, f"epoch{epoch}_step{step}.png")
+        action_path = os.path.join(self.save_dir, "actions")
+        action_path = os.path.join(action_path, f"epoch{epoch}_step{step}.csv")
+        for i in range(img_fake_np.shape[0]):
+            ax_fake = axes[0, i]
+            ax_real = axes[1, i]
+
+            fake_img = convert_to_displayable_format(img_fake_np[i])
+            real_img = convert_to_displayable_format(img_real_np[i])
+
+            ax_fake.imshow(fake_img)
+            ax_fake.axis("off")
+            ax_fake.set_title("Fake")
+
+            ax_real.imshow(real_img)
+            ax_real.axis("off")
+            ax_real.set_title("Real")
+
+        plt.tight_layout()
+        plt.savefig(image_path)
+        plt.close()
+        np.savetxt(
+            action_path,
+            actions.detach().cpu().numpy(),
             delimiter=",",
         )
 

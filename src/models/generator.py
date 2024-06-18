@@ -44,6 +44,51 @@ class GeneratorActor(nn.Module):
         return self.seq(input)
 
 
+class GeneratorActor2(nn.Module):
+
+    def __init__(self, size_fm=64, size_z=100, channel_size=3):
+        super(GeneratorActor2, self).__init__()
+        self.seq = nn.Sequential(
+            nn.ConvTranspose2d(size_z + 11, size_fm * 16, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(size_fm * 16),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 16, size_fm * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 8),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 8, size_fm * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 4, size_fm * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 2, size_fm, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm, channel_size, 4, 2, 1, bias=False),
+            nn.Tanh(),
+        )
+
+    def forward(self, noise, action):
+        # Encode angles using sine and cosine
+        sin_cos = torch.cat(
+            [torch.sin(action[:, 3:]), torch.cos(action[:, 3:])], dim=-1
+        )
+
+        # Concatenate positions and sine-cosine encoded angles
+        action = torch.cat([action[:, :3], sin_cos], dim=-1)
+
+        # Reshape action to make it compatible for concatenation
+        action = action.view(action.size(0), action.size(1), 1, 1)
+
+        # Repeat the action tensor to match input dimensions
+        action = action.repeat(1, 1, noise.size(2), noise.size(3))
+
+        # Concatenate input and action
+        input = torch.cat((noise, action), 1)
+
+        return self.seq(input)
+
+
 class GeneratorAttention(nn.Module):
     def __init__(self, nz=100, na=7, size_fm=64, nc=3):
         super(GeneratorAttention, self).__init__()
