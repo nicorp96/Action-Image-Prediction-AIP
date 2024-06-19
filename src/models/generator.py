@@ -1,8 +1,12 @@
 import torch.nn as nn
 import torch
+import numpy as np
 
 
 class GeneratorActor(nn.Module):
+    """GAN based on Deep Convolutional GAN (DCGAN)
+    Transposed Convolutions: Perform upsampling to generate a larger image from the latent vector.
+    """
 
     def __init__(self, size_fm=64, size_z=100, channel_size=3):
         super(GeneratorActor, self).__init__()
@@ -89,64 +93,63 @@ class GeneratorActor2(nn.Module):
         return self.seq(input)
 
 
-class GeneratorAttention(nn.Module):
-    def __init__(self, nz=100, na=7, size_fm=64, nc=3):
-        super(GeneratorAttention, self).__init__()
-        self.nz = nz
-        self.na = na
-        self.size_fm = size_fm
+class GeneratorActorUN(nn.Module):
 
-        # Process noise z
-        self.noise_fc = nn.Sequential(
-            nn.Linear(nz, self.size_fm * 8 * 8 * 8), nn.ReLU(True)
+    def __init__(self, size_fm=64, size_z=100, channel_size=3):
+        super(GeneratorActorUN, self).__init__()
+
+        self.downsampler = nn.Sequential(
+            nn.Conv2d(size_z + 11, size_fm * 4, 2, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 4),
+            nn.ReLU(True),
+            nn.Conv2d(size_fm * 4, size_fm * 8, 2, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 8),
+            nn.ReLU(True),
+            nn.Conv2d(size_fm * 8, size_fm * 16, 2, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 16),
+            nn.ReLU(True),
         )
 
-        # Attention mechanism for actions
-        self.attn_fc = nn.Linear(na, size_fm * 8 * 8 * 8)
-        self.attn = nn.MultiheadAttention(embed_dim=size_fm * 8 * 8 * 8, num_heads=8)
-
-        # Convolutional layers
-        self.gen = nn.Sequential(
-            nn.ConvTranspose2d(
-                self.size_fm * 8 * 2, self.size_fm * 4, 4, 2, 1, bias=False
-            ),
-            nn.BatchNorm2d(self.size_fm * 4),
+        self.upsampler = nn.Sequential(
+            nn.ConvTranspose2d(size_fm * 16, size_fm * 8, 2, 1, 0, bias=False),
+            nn.BatchNorm2d(size_fm * 8),
             nn.ReLU(True),
-            nn.ConvTranspose2d(self.size_fm * 4, self.size_fm * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(self.size_fm * 2),
+            nn.ConvTranspose2d(size_fm * 8, size_fm * 4, 2, 1, 0, bias=False),
+            nn.BatchNorm2d(size_fm * 4),
             nn.ReLU(True),
-            nn.ConvTranspose2d(self.size_fm * 2, self.size_fm, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(self.size_fm),
+            nn.ConvTranspose2d(size_fm * 4, size_fm * 2, 2, 1, 0, bias=False),
+            nn.BatchNorm2d(size_fm * 2),
             nn.ReLU(True),
-            nn.ConvTranspose2d(self.size_fm, nc, 4, 2, 1, bias=False),
+            nn.ConvTranspose2d(size_fm * 2, size_fm, 2, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm, channel_size, 2, 2, 1, bias=False),
             nn.Tanh(),
         )
 
-    def forward(self, z, action):
-        # Process noise
-        noise_output = self.noise_fc(z)
-        noise_output = noise_output.view(noise_output.size(0), self.size_fm * 8, 8, 8)
-
-        # Process action through attention
-        action_proj = (
-            self.attn_fc(action)
-            .view(action.size(0), self.size_fm * 8, 8 * 8)
-            .permute(2, 0, 1)
-        )
-        print(action_proj.size())
-        action_attn, _ = self.attn(action_proj, action_proj, action_proj)
-        action_attn = action_attn.permute(1, 2, 0).view(
-            action.size(0), self.size_fm * 8, 8, 8
+    def forward(self, noise, action):
+        # Encode angles using sine and cosine
+        sin_cos = torch.cat(
+            [torch.sin(action[:, 3:]), torch.cos(action[:, 3:])], dim=-1
         )
 
-        print(action_attn.size())
-        print(noise_output.size())
-        print(action_attn.size())
-        # Concatenate noise and action output
-        combined = torch.cat([noise_output, action_attn], dim=1)
+        # Concatenate positions and sine-cosine encoded angles
+        action = torch.cat([action[:, :3], sin_cos], dim=-1)
 
-        # Generate image
-        return self.gen(combined)
+        # Reshape action to make it compatible for concatenation
+        action = action.view(action.size(0), action.size(1), 1, 1)
+
+        # Repeat the action tensor to match input dimensions
+        action = action.repeat(1, 1, noise.size(2), noise.size(3))
+
+        # Concatenate input and action
+        input = torch.cat((noise, action), 1)
+
+        # Downsample
+        downsampled = self.downsampler(input)
+
+        # Upsample and output
+        return self.upsampler(downsampled)
 
 
 class Generator(nn.Module):
@@ -177,3 +180,83 @@ class Generator(nn.Module):
 
     def forward(self, input):
         return self.seq(input)
+
+
+class GeneratorFK(nn.Module):
+
+    def __init__(self, size_z=100, action_dim=11):
+        super(GeneratorFK, self).__init__()
+
+        self.size_z = size_z
+        self.action_dim = action_dim
+        self.linear = nn.Sequential(
+            nn.Linear(111, 128 * 128 * 3, bias=False),
+        )
+        self.seq = nn.Sequential(
+            nn.Conv2d(
+                3,
+                128,
+                kernel_size=4,
+                stride=1,
+                padding=1,
+                bias=False,
+            ),
+            nn.Conv2d(128, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 256, kernel_size=4, stride=1, padding=1, bias=False),
+            nn.Conv2d(256, 256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(
+                256, 512, kernel_size=4, stride=1, padding=1, bias=False
+            ),
+            nn.Conv2d(512, 512, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(
+                512, 512, kernel_size=4, stride=1, padding=1, bias=False
+            ),
+            nn.ConvTranspose2d(
+                512, 512, kernel_size=4, stride=2, padding=1, bias=False
+            ),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.ConvTranspose2d(
+                512, 256, kernel_size=4, stride=1, padding=1, bias=False
+            ),
+            nn.ConvTranspose2d(
+                256, 256, kernel_size=4, stride=2, padding=1, bias=False
+            ),
+            nn.BatchNorm2d(256),
+            nn.ConvTranspose2d(
+                256, 128, kernel_size=4, stride=2, padding=1, bias=False
+            ),
+            nn.ConvTranspose2d(
+                128, 128, kernel_size=4, stride=1, padding=1, bias=False
+            ),
+            nn.BatchNorm2d(128),
+            nn.ConvTranspose2d(128, 3, kernel_size=4, stride=1, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, noise, action):
+        # Encode angles using sine and cosine
+        sin_cos = torch.cat(
+            [torch.sin(action[:, 3:]), torch.cos(action[:, 3:])], dim=-1
+        )
+
+        # Concatenate positions and sine-cosine encoded angles
+        action = torch.cat([action[:, :3], sin_cos], dim=-1)
+
+        # # Reshape action to make it compatible for concatenation
+        # action = action.view(action.size(0), action.size(1), 1, 1)
+
+        # # Repeat the action tensor to match input dimensions
+        # action = action.repeat(noise.size(2), noise.size(3))
+
+        # Concatenate input and action
+        input = torch.cat((noise, action), 1)
+        input_ve = self.linear(input)
+        input_ve = input_ve.view(input_ve.size(0), 3, 128, 128)
+
+        return self.seq(input_ve)

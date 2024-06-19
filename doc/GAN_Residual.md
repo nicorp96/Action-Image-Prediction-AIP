@@ -19,7 +19,7 @@ In Conditional Batch Normalization, the batch normalization parameters (mean, va
 
 ## Auxiliary Classifier GAN (AC-GAN):
 
-In AC-GANs, the discriminator not only outputs the probability of the data being real or fake but also tries to predict the conditioning information (TCP coordinates in your case).
+In AC-GANs, the discriminator not only outputs the probability of the data being real or fake but also tries to predict the conditioning information.
 
 ## Projection-Based Conditioning:
 

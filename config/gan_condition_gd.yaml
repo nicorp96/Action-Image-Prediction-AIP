@@ -1,0 +1,12 @@
+noise_dim: 100
+generator_lr: 0.0001
+generator_betas: [0.5, 0.9]
+discriminator_lr: 0.0001
+discriminator_betas: [0.5, 0.9]
+fixed_noise_samples: 5
+criterion: "BCE"
+num_epochs: 600
+image_size: 64
+data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
+save_dir: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_d_g_cond"
+batch_size: 64

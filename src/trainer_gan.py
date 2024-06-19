@@ -9,6 +9,7 @@ from dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
+import yaml
 
 
 def weights_init(m):
@@ -81,23 +82,36 @@ def generate_random_actions(range_pos=None):
 
 class Trainer:
     def __init__(self, config_dir) -> None:
-        self.config_dir = config_dir
+        # Load configuration from YAML file
+        self.__load_config_file__(config_dir)
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.noise_dim = 100
+        self.noise_dim = self.config["noise_dim"]
         self.generator = GeneratorActor().to(self.device)
         self.generator.apply(weights_init)
         self.discriminator = Discriminator().to(self.device)
         self.discriminator.apply(weights_init)
         self.optimizer_gen = optim.Adam(
-            self.generator.parameters(), lr=0.0001, betas=(0.5, 0.9)
+            self.generator.parameters(),
+            lr=self.config["generator_lr"],
+            betas=tuple(self.config["generator_betas"]),
         )
         self.optimizer_dis = optim.Adam(
-            self.discriminator.parameters(), lr=0.0001, betas=(0.5, 0.9)
+            self.discriminator.parameters(),
+            lr=self.config["discriminator_lr"],
+            betas=tuple(self.config["discriminator_betas"]),
         )
-        self.fixed_noise = torch.randn(5, self.noise_dim, 1, 1, device=self.device)
-        self.criterion = nn.BCELoss()
-        self.num_epochs = 600
-        self.image_size = 64
+        self.fixed_noise = torch.randn(
+            self.config["fixed_noise_samples"], self.noise_dim, 1, 1, device=self.device
+        )
+
+        if self.config["criterion"] == "BCE":
+            self.criterion = nn.BCELoss()
+        # Add more criteria as needed
+
+        self.num_epochs = self.config["num_epochs"]
+        self.image_size = self.config["image_size"]
+
         # Example transform
         transform = transforms.Compose(
             [
@@ -109,13 +123,16 @@ class Trainer:
         )
 
         # Load dataset
-        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
-        self.save_dir = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_nm"
+        self.data_path = self.config["data_path"]
+        self.save_dir = self.config["save_dir"]
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
-        self.data_loader = DataLoader(self.dataset, batch_size=64, shuffle=True)
+        self.data_loader = DataLoader(
+            self.dataset, batch_size=self.config["batch_size"], shuffle=True
+        )
 
-    def __load_config_file__(self):
-        pass  #
+    def __load_config_file__(self, config_dir):
+        with open(config_dir, "r") as file:
+            self.config = yaml.safe_load(file)
 
     def train(self):
         for epoch in range(self.num_epochs):
@@ -223,6 +240,6 @@ class Trainer:
 
 if __name__ == "__main__":
     trainer = Trainer(
-        "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/config"
+        "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/config/gan_img.yaml"
     )
     trainer.train()

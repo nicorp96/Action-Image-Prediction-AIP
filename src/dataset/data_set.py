@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+import torch
 import numpy as np
 
 
@@ -31,8 +32,9 @@ class RobotDataset(Dataset):
             initial_state = self.transform(data_obs_i["image_current"])
             next_state = self.transform(data_obs_i["image_after_action"])
         # Normalize action
-        action_nm = self.normalize_action(
-            data_obs_i["action"][np.newaxis, :],
+        action_torch = torch.from_numpy(data_obs_i["action"][np.newaxis, :])
+        action_nm = self.normalize_action_torch(
+            action_torch,
             pos_range=(self.min, self.max),
             method="min-max",
         ).squeeze()
@@ -62,11 +64,6 @@ class RobotDataset(Dataset):
             positions = (positions - pos_min) / (pos_max - pos_min + 1e-6)
             positions = 2 * positions - 1  # Normalize to range [-1, 1]
 
-            # Normalize Euler angles using min-max scaling
-            # euler_min, euler_max = euler_range
-            # euler_angles = (euler_angles - euler_min) / (euler_max - euler_min)
-            # euler_angles = 2 * euler_angles - 1  # Normalize to range [-1, 1]
-
         elif method == "z-score":
             # Standardize positions
             pos_mean, pos_std = positions.mean(axis=0), positions.std(axis=0)
@@ -81,16 +78,35 @@ class RobotDataset(Dataset):
         actions_normalized = np.concatenate([positions, euler_angles], axis=1)
         return actions_normalized
 
-    def normlize2(action):
-        # Normalize actions to [-1, 1]
-        action_norm = action
-        action_norm[:, :3] = (
-            action_norm[:, :3] - action_norm[:, :3].min(0, keepdim=True)[0]
-        ) / (
-            action_norm[:, :3].max(0, keepdim=True)[0]
-            - action_norm[:, :3].min(0, keepdim=True)[0]
-        ) * 2 - 1
-        action_norm[:, 3:] = torch.stack(
-            [torch.sin(action_norm[:, 3:]), torch.cos(action_norm[:, 3:])], dim=-1
-        ).view(action_norm.size(0), -1)
-        return action_norm
+    @staticmethod
+    def normalize_action_torch(
+        actions,
+        pos_range=None,
+        method="min-max",
+    ):
+        positions = actions[:, :3]
+        euler_angles = actions[:, 3:]
+
+        if method == "min-max":
+            # Normalize positions using min-max scaling
+            if pos_range is None:
+                pos_min, pos_max = positions.min(dim=0)[0], positions.max(dim=0)[0]
+            else:
+                pos_min, pos_max = pos_range
+
+            positions = (positions - pos_min) / (pos_max - pos_min + 1e-6)
+            positions = 2 * positions - 1  # Normalize to range [-1, 1]
+
+        elif method == "z-score":
+            # Standardize positions
+            pos_mean, pos_std = positions.mean(dim=0), positions.std(dim=0)
+            positions = (positions - pos_mean) / pos_std
+
+            # Standardize Euler angles
+            euler_mean, euler_std = euler_angles.mean(dim=0), euler_angles.std(dim=0)
+            euler_angles = (euler_angles - euler_mean) / euler_std
+        else:
+            raise ValueError("Normalization method not recognized.")
+
+        actions_normalized = torch.cat([positions, euler_angles], dim=1)
+        return actions_normalized
