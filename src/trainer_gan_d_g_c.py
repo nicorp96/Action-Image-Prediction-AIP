@@ -52,8 +52,10 @@ class Trainer:
 
         if self.config["criterion"] == "BCE":
             self.criterion = nn.BCELoss()
-        # Add more criteria as needed
-
+        elif self.config["criterion"] == "MSE":
+            self.criterion = nn.MSELoss()
+        else:
+            raise ValueError
         self.num_epochs = self.config["num_epochs"]
         self.image_size = self.config["image_size"]
 

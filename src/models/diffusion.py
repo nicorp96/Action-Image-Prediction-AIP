@@ -82,7 +82,6 @@ class DiffusionForward:
             :, None, None, None
         ]  # Broadcasting to image dimensions
         noisy_image = alpha_t.sqrt() * x + (1 - alpha_t).sqrt() * noise
-
         if save_image:
             self.save_image(
                 noisy_image,
@@ -131,11 +130,12 @@ class DiffusionReverse:
         """Iterate through timesteps to denoise the image."""
         for timestep in reversed(range(len(self.betas))):
             noisy_image = self.remove_noise(noisy_image, timestep, cond)
-            if save_image:
-                self.save_image(
-                    noisy_image,
-                    f"{self.save_dir}/epoch_{epoch}_timestep_{timestep}_id_{image_id}.png",
-                )
+
+        if save_image:
+            self.save_image(
+                noisy_image,
+                f"{self.save_dir}/epoch_{epoch}_timestep_{timestep}_id_{image_id}.png",
+            )
         return noisy_image
 
     def save_image(self, tensor_image, filename):

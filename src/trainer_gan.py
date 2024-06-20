@@ -112,7 +112,6 @@ class Trainer:
         self.num_epochs = self.config["num_epochs"]
         self.image_size = self.config["image_size"]
 
-        # Example transform
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),

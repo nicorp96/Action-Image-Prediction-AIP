@@ -48,8 +48,8 @@ class Trainer:
             betas=tuple(self.config["discriminator_betas"]),
         )
         self.fixed_noise = torch.randn(5, self.noise_dim, device=self.device)
-        self.criterion = nn.BCELoss()
-
+        # self.criterion = nn.BCELoss()
+        self.criterion = nn.MSELoss()
         # Example transform
         transform = transforms.Compose(
             [
