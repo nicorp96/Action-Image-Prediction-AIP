@@ -50,7 +50,6 @@ class Trainer:
         self.fixed_noise = torch.randn(5, self.noise_dim, device=self.device)
         # self.criterion = nn.BCELoss()
         self.criterion = nn.MSELoss()
-        # Example transform
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),

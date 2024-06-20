@@ -42,7 +42,6 @@ class Trainer:
         self.criterion_action = nn.MSELoss()
         self.num_epochs = 700
         self.image_size = 64
-        # Example transform
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),

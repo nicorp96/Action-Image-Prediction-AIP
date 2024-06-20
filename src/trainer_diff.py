@@ -24,7 +24,7 @@ class Trainer:
         self.cond_channels = 7
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         self.criterion = nn.MSELoss()
-        self.num_epochs = 200
+        self.num_epochs = 400
         self.image_size = 64
         # Example transform
         transform = transforms.Compose(
@@ -47,25 +47,23 @@ class Trainer:
 
     def train(self):
         for epoch in range(self.num_epochs):
-            for step, (current_state, next_state, action) in enumerate(
-                self.data_loader
-            ):
-                current_state, action, next_state = (
-                    current_state.to(self.device),
+            for step, (current_img, next_img, action) in enumerate(self.data_loader):
+                current_img, action, next_img = (
+                    current_img.to(self.device),
                     action.to(
                         self.device,
                         dtype=torch.float32,
                     ),
-                    next_state.to(self.device),
+                    next_img.to(self.device),
                 )
 
                 self.model.zero_grad()
 
                 # Add noise to images using forward diffusion
                 noisy_images, ground_truth_noise = self.diffusion_forward.add_noise(
-                    next_state,
+                    next_img,
                     torch.randint(
-                        0, len(self.diffusion_forward.betas), (current_state.size(0),)
+                        0, len(self.diffusion_forward.betas), (next_img.size(0),)
                     ),
                 )
 
@@ -80,9 +78,9 @@ class Trainer:
 
             if epoch % 25 == 0:
                 noisy_image, _ = self.diffusion_forward.add_noise(
-                    current_state,
+                    next_img,
                     torch.randint(
-                        0, len(self.diffusion_forward.betas), (current_state.size(0),)
+                        0, len(self.diffusion_forward.betas), (next_img.size(0),)
                     ),
                     save_image=True,
                     image_id=step,
