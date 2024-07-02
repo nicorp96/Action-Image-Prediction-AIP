@@ -38,6 +38,42 @@ class DiscriminatorCA(nn.Module):
         return self.main(x)
 
 
+class DiscriminatorCA1(nn.Module):
+    """
+    Discrimnator Conditioned with action.
+    this architecture is based on the DCGAN principles but includes additional conditioning information in the form of action inputs.
+    """
+
+    def __init__(self, site_fm=64, channel_size=3, action_size=7):
+        super(DiscriminatorCA1, self).__init__()
+        self.action_size = action_size  # Store the number of action dimensions
+        self.fc = nn.Sequential(
+            nn.Linear(action_size, site_fm * site_fm * channel_size), nn.ReLU()
+        )
+        self.main = nn.Sequential(
+            nn.Conv2d(channel_size * 2, site_fm, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(site_fm, site_fm * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(site_fm * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(site_fm * 2, site_fm * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(site_fm * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(site_fm * 4, site_fm * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(site_fm * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(site_fm * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x, action):
+        # Expand and concatenate action tensor
+        action_expanded = self.fc(action).view(x.size())
+        x = torch.cat([x, action_expanded], 1)
+        # Pass through the main sequential layers
+        return self.main(x)
+
+
 class DiscriminatorCA2(nn.Module):
     """
     Discrimnator Conditioned with action on last layer.

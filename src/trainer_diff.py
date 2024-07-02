@@ -1,6 +1,12 @@
 import torch
 import torch.nn as nn
-from models.diffusion import DiffusionForward, DiffusionReverse, UNet
+from models.diffusion import (
+    DiffusionForward,
+    DiffusionReverse,
+    UNet,
+    UNet2,
+    TransformerDiffusionModel,
+)
 
 import torch.optim as optim
 from torchvision import transforms
@@ -13,19 +19,25 @@ class Trainer:
         self.config_dir = config_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = 100
-        self.model = UNet(in_channels=3, out_channels=3, cond_channels=7).to(
-            device=self.device
-        )
-        betas = torch.linspace(0.0001, 0.02, steps=25).to(
+        self.num_epochs = 1000
+        self.image_size = 64
+        self.cond_channels = 7
+
+        # self.model = UNet2(in_channels=3, out_channels=3, cond_channels=7).to(
+        #     device=self.device
+        # )
+        self.model = TransformerDiffusionModel(
+            image_size=64, patch_size=16, num_classes=3, cond_channels=7
+        ).to(device=self.device)
+
+        betas = torch.linspace(0.0001, 0.02, steps=20).to(
             dtype=torch.float32, device=self.device
         )
         self.diffusion_forward = DiffusionForward(betas, self.device)
         self.diffusion_reverse = DiffusionReverse(betas, self.model)
-        self.cond_channels = 7
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         self.criterion = nn.MSELoss()
-        self.num_epochs = 400
-        self.image_size = 64
+
         # Example transform
         transform = transforms.Compose(
             [
@@ -37,7 +49,7 @@ class Trainer:
         )
 
         # Load dataset
-        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
+        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
 
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
         self.data_loader = DataLoader(self.dataset, batch_size=32, shuffle=True)
@@ -61,9 +73,9 @@ class Trainer:
 
                 # Add noise to images using forward diffusion
                 noisy_images, ground_truth_noise = self.diffusion_forward.add_noise(
-                    next_img,
+                    current_img,
                     torch.randint(
-                        0, len(self.diffusion_forward.betas), (next_img.size(0),)
+                        0, len(self.diffusion_forward.betas), (current_img.size(0),)
                     ),
                 )
 
