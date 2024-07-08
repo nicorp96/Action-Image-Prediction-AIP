@@ -74,10 +74,39 @@ class Trainer:
         self.data_loader = DataLoader(
             self.dataset, batch_size=self.config["batch_size"], shuffle=True
         )
+        self.save_dir_metric = self.config["save_dir_metric"]
+        self.save_dir_mdl = self.config["save_dir_checkpoint"]
+        # Initialize arrays to store metrics
+        self.epoch_metrics = {
+            "epoch": [],
+            "step": [],
+            "loss_d": [],
+            "loss_g": [],
+            "D_x": [],
+            "D_G_z_real": [],
+            "D_G_z_fake": [],
+        }
 
     def __load_config_file__(self):
         with open(self.config_dir, "r") as file:
             self.config = yaml.safe_load(file)
+
+    def save_metrics(self):
+        metrics_path = os.path.join(self.save_dir_metric, "training_metrics.npz")
+        np.savez(metrics_path, **self.epoch_metrics)
+
+    def save_weights(self):
+        model_dir = os.path.join(self.save_dir, "models")
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir)
+        torch.save(
+            self.generator.state_dict(),
+            os.path.join(model_dir, f"generator_epoch.pth"),
+        )
+        torch.save(
+            self.discriminator.state_dict(),
+            os.path.join(model_dir, f"discriminator_epoch.pth"),
+        )
 
     def train(self):
         for epoch in range(self.num_epochs):
@@ -132,6 +161,11 @@ class Trainer:
                 # Update G
                 self.optimizer_gen.step()
                 self.optimizer_gen.zero_grad()
+                self.epoch_metrics["epoch"].append(epoch)
+                self.epoch_metrics["step"].append(step)
+                self.epoch_metrics["loss_d"].append(errD.item())
+                self.epoch_metrics["loss_g"].append(errG.item())
+                self.epoch_metrics["D_x"].append(D_x)
                 if step % 50 == 0:
                     print(
                         "[%d/%d][%d/%d]\tLoss_D: %.6f\tLoss_G: %.6f\tD(x): %.6f\tD(G(z)): %.6f / %.6f"
@@ -221,3 +255,5 @@ if __name__ == "__main__":
         "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/gan_condition_gd.yaml"
     )
     trainer.train()
+    trainer.save_metrics()
+    trainer.save_weights()
