@@ -182,6 +182,89 @@ class Generator(nn.Module):
         return self.seq(input)
 
 
+class ImageProcessor(nn.Module):
+    """CNN module to process the input robot image"""
+
+    def __init__(self):
+        super(ImageProcessor, self).__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(True),
+        )
+        self.fc = nn.Linear(512 * 4 * 4, 100)
+
+    def forward(self, image):
+        x = self.conv_layers(image)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc(x)
+        return x
+
+
+class GeneratorActorImg(nn.Module):
+
+    def __init__(self, size_fm=64, size_z=100, channel_size=3):
+        super(GeneratorActorImg, self).__init__()
+        self.image_processor = ImageProcessor()
+        self.seq = nn.Sequential(
+            nn.ConvTranspose2d(size_z + 100 + 11, size_fm * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(size_fm * 8),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 8, size_fm * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 4, size_fm * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm * 2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm * 2, size_fm, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(size_fm),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(size_fm, channel_size, 4, 2, 1, bias=False),
+            nn.Tanh(),
+        )
+
+    def forward(self, noise, action, current_image):
+        # Process the image to get a feature vector
+        image_features = self.image_processor(current_image)
+
+        # Encode angles using sine and cosine
+        sin_cos = torch.cat(
+            [torch.sin(action[:, 3:]), torch.cos(action[:, 3:])], dim=-1
+        )
+
+        # Concatenate positions and sine-cosine encoded angles
+        action = torch.cat([action[:, :3], sin_cos], dim=-1)
+
+        # Reshape action to make it compatible for concatenation
+        action = action.view(action.size(0), action.size(1), 1, 1)
+
+        # Repeat the action tensor to match input dimensions
+        action = action.repeat(1, 1, noise.size(2), noise.size(3))
+
+        # Concatenate noise, action and image features
+        combined_input = torch.cat((noise, action), 1)
+
+        # Repeat the reshaped image_features tensor to match input dimensions
+        image_features = image_features.view(image_features.size(0), 100, 1, 1)
+        image_features = image_features.repeat(
+            1, 1, combined_input.size(2), combined_input.size(3)
+        )
+
+        # Final combined input
+        input = torch.cat((combined_input, image_features), 1)
+
+        return self.seq(input)
+
+
 class GeneratorFK(nn.Module):
 
     def __init__(self, size_z=100, action_dim=11):

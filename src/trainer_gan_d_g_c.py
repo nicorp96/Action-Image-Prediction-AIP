@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorActor, GeneratorActor2, GeneratorActorUN
+from models.generator import (
+    GeneratorActor,
+    GeneratorActor2,
+    GeneratorActorUN,
+    GeneratorActorImg,
+)
 from models.discriminator import DiscriminatorCA2, DiscriminatorCA
 import torch.optim as optim
 from torchvision import transforms
@@ -30,7 +35,7 @@ class Trainer:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = self.config["noise_dim"]
-        self.generator = GeneratorActor().to(self.device)
+        self.generator = GeneratorActorImg().to(self.device)
         self.generator.apply(weights_init)
         self.discriminator = DiscriminatorCA().to(
             self.device
@@ -133,7 +138,7 @@ class Trainer:
                 noise = torch.randn(b_size, self.noise_dim, 1, 1, device=self.device)
 
                 # Generate fake image batch with G
-                fake = self.generator(noise, action)
+                fake = self.generator(noise, action, current_image)
                 fake_labels = torch.zeros(next_image.size(0), device=self.device)
                 # Classify all fake batch with D
                 output = self.discriminator(fake.detach(), action).view(-1)
@@ -186,7 +191,9 @@ class Trainer:
                 os.makedirs("results")
             if epoch % 25 == 0:
                 with torch.no_grad():
-                    fake = self.generator(self.fixed_noise, action[:5, :])
+                    fake = self.generator(
+                        self.fixed_noise, action[:5, :], current_image[:5, :, :]
+                    )
                 # self.save_images_actions(epoch, step, fake, action)
                 self.save_images_actions_real(
                     epoch,

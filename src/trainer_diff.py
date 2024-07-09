@@ -6,6 +6,7 @@ from models.diffusion import (
     UNet,
     UNet2,
     TransformerDiffusionModel,
+    DiffusionForward2,
 )
 
 import torch.optim as optim
@@ -33,7 +34,7 @@ class Trainer:
         betas = torch.linspace(0.0001, 0.02, steps=20).to(
             dtype=torch.float32, device=self.device
         )
-        self.diffusion_forward = DiffusionForward(betas, self.device)
+        self.diffusion_forward = DiffusionForward2(betas, self.device)
         self.diffusion_reverse = DiffusionReverse(betas, self.model)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         self.criterion = nn.MSELoss()
@@ -73,12 +74,12 @@ class Trainer:
 
                 # Add noise to images using forward diffusion
                 noisy_images, ground_truth_noise = self.diffusion_forward.add_noise(
-                    current_img,
+                    next_img,
                     torch.randint(
-                        0, len(self.diffusion_forward.betas), (current_img.size(0),)
+                        0, len(self.diffusion_forward.betas), (next_img.size(0),)
                     ),
+                    current_img=None,  # current_img,
                 )
-
                 # Predict noise using the model
                 predicted_noise = self.model(noisy_images, action)
 
@@ -94,6 +95,7 @@ class Trainer:
                     torch.randint(
                         0, len(self.diffusion_forward.betas), (next_img.size(0),)
                     ),
+                    current_img=current_img,
                     save_image=True,
                     image_id=step,
                     epoch=epoch,

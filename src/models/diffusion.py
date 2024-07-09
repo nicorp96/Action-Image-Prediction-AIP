@@ -4,6 +4,7 @@ import os
 from PIL import Image
 import numpy as np
 from transformers import ViTModel, ViTConfig
+import matplotlib.pyplot as plt
 
 
 class UNet(nn.Module):
@@ -158,6 +159,44 @@ class DiffusionForward:
         Image.fromarray(image).save(filename)
 
 
+class DiffusionForward2:
+
+    def __init__(self, betas, device, save_dir="forward_debug"):
+        self.betas = betas
+        self.alphas = 1.0 - self.betas
+        self.device = device
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.save_dir = save_dir
+        self.device = device
+        os.makedirs(self.save_dir, exist_ok=True)
+
+    def add_noise(self, x, t, current_img=None, save_image=False, image_id=0, epoch=0):
+        """Add noise to the images based on the schedule."""
+        noise = torch.randn_like(x)
+        alpha_t = self.alphas_cumprod[t][
+            :, None, None, None
+        ]  # Broadcasting to image dimensions
+        noisy_image = alpha_t.sqrt() * x + (1 - alpha_t).sqrt() * noise
+
+        if current_img is not None:
+            # Concatenate the current image along the channel dimension
+            noisy_image = torch.cat((current_img, noisy_image), dim=1)
+
+        if save_image:
+            self.save_image(
+                noisy_image,
+                f"{self.save_dir}/noisy_epoch_{epoch}_id_{image_id}.png",
+            )
+
+        noisy_image = noisy_image.to(dtype=torch.float32, device=self.device)
+        return noisy_image, noise
+
+    def save_image(self, tensor_image, filename):
+        image = tensor_image[0].permute(1, 2, 0).cpu().numpy()
+        image = (image * 255).astype(np.uint8)
+        Image.fromarray(image).save(filename)
+
+
 class DiffusionReverse:
     def __init__(self, betas, model, save_dir="reverse_debug"):
 
@@ -186,25 +225,69 @@ class DiffusionReverse:
         )
         return denoised_image
 
+    # def reverse_diffusion(
+    #     self, noisy_image, cond, save_image=False, image_id=0, epoch=0
+    # ):
+    #     """Iterate through timesteps to denoise the image."""
+    #     for timestep in reversed(range(len(self.betas))):
+    #         noisy_image = self.remove_noise(noisy_image, timestep, cond)
+
+    #         if save_image:
+    #             self.save_image(
+    #                 noisy_image,
+    #                 f"{self.save_dir}/epoch_{epoch}_timestep_{timestep}_id_{image_id}.png",
+    #             )
+    #     return noisy_image
+
+    # def save_image(self, tensor_image, filename):
+    #     with torch.no_grad():
+    #         image_np = tensor_image[0].permute(1, 2, 0).cpu().numpy()
+    #     image_np = (image_np * 255).astype(np.uint8)
+    #     Image.fromarray(image_np).save(filename)
+
     def reverse_diffusion(
         self, noisy_image, cond, save_image=False, image_id=0, epoch=0
     ):
-        """Iterate through timesteps to denoise the image."""
+        """Iterate through timesteps to denoise the image and save in a single figure."""
+        intermediate_images = []
+
         for timestep in reversed(range(len(self.betas))):
             noisy_image = self.remove_noise(noisy_image, timestep, cond)
 
+            if save_image:
+                with torch.no_grad():
+                    image_np = noisy_image[0].permute(1, 2, 0).cpu().numpy()
+                    image_np = (image_np * 255).astype(np.uint8)
+                    intermediate_images.append(image_np)
+
         if save_image:
-            self.save_image(
-                noisy_image,
-                f"{self.save_dir}/epoch_{epoch}_timestep_{timestep}_id_{image_id}.png",
+            self.save_figure(
+                intermediate_images, f"{self.save_dir}/epoch_{epoch}_id_{image_id}.png"
             )
+
         return noisy_image
 
-    def save_image(self, tensor_image, filename):
-        with torch.no_grad():
-            image_np = tensor_image[0].permute(1, 2, 0).cpu().numpy()
-        image_np = (image_np * 255).astype(np.uint8)
-        Image.fromarray(image_np).save(filename)
+    def save_figure(self, image_list, filename):
+        """Save a grid of images as subplots in a single figure."""
+        # Calculate grid size
+        num_images = len(image_list)
+        grid_size = int(np.ceil(np.sqrt(num_images)))
+
+        fig, axs = plt.subplots(grid_size, grid_size, figsize=(15, 15))
+        axs = axs.ravel()  # Flatten the axis array
+
+        for i in range(grid_size * grid_size):
+            axs[i].axis("off")  # Turn off axis
+            if i < num_images:
+                axs[i].imshow(image_list[i])
+            else:
+                axs[i].imshow(
+                    np.zeros_like(image_list[0])
+                )  # Fill remaining subplots with black rectangles
+
+        plt.tight_layout()
+        plt.savefig(filename, bbox_inches="tight")
+        plt.close(fig)
 
 
 class TransformerDiffusionModel(nn.Module):
@@ -230,10 +313,8 @@ class TransformerDiffusionModel(nn.Module):
         # self.up_conv2 = nn.ConvTranspose2d(64, num_classes, kernel_size=2, stride=2)
 
     def forward(self, x, cond):
-
         cond = self.conditioning_layer(cond).unsqueeze(2).unsqueeze(3)
         cond = cond.expand(-1, -1, x.size(2), x.size(3))
-
         x = x + cond
         outputs = self.transformer(pixel_values=x)
         sequence_output = outputs.last_hidden_state
