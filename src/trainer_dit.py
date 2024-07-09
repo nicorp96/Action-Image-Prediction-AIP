@@ -104,7 +104,7 @@ class DiTTrainer:
             f"stabilityai/stable-diffusion-xl-refiner-1.0", subfolder="vae"
         ).to(self.device)
         self.image_size = 128
-        self.n_epochs = 200
+        self.n_epochs = 500
         # Load dataset
         self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
         transform = transforms.Compose(
@@ -221,7 +221,7 @@ class DiTTrainer:
             update_ema(self.ema, self.model_ddp.module)
             running_loss += loss.item()
 
-            if step == 200:
+            if step % 200 == 0:
                 with torch.no_grad():
                     model_kwargs = dict(a=action[:2, :])
                     z = torch.randn(
@@ -249,7 +249,7 @@ class DiTTrainer:
                         value_range=(-1, 1),
                     )
                     save_image(
-                        current_img[:2, :, :],
+                        next_img[:2, :, :],
                         f"results/diffusion_dit/real/epoch_{step}.png",
                         nrow=4,
                         normalize=True,

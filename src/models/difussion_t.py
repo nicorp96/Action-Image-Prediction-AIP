@@ -56,7 +56,7 @@ class TimestepEmbedder(nn.Module):
 
 class ActionEmbedder(nn.Module):
     """
-    Embeds actions (e.g., TCP positions in (x, y, z, rpx, rpy, rpz)) into vector representations.
+    Embeds actions (e.g., TCP positions in (x, y, z, rpx, rpy, rpz, g_d^)) into vector representations.
     """
 
     def __init__(self, hidden_size, action_dim):
@@ -222,7 +222,6 @@ class DiT(nn.Module):
     def unpatchify(self, x):
         """
         x: (N, T, patch_size**2 * C)
-        imgs: (N, H, W, C)
         """
         c = self.out_channels
         p = self.x_embedder.patch_size[0]
@@ -234,6 +233,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
+    # TODO: Add current image as embedding https://github.com/homangab/Track-2-Act/blob/main/single_script.py
     def forward(self, x, t, a):
         """
         Forward pass of DiT which now also takes actions as input.
