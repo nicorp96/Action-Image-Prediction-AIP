@@ -1,14 +1,15 @@
 import torch
 import torch.nn as nn
-from models.generator_res import GeneratorActorRes, GeneratorActorResIm
-from models.discriminator import DiscriminatorCA
+from src.models.generator_res import GeneratorActorRes, GeneratorActorResIm
+from src.models.discriminator import DiscriminatorCA
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from dataset.data_set import RobotDataset
+from src.dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
+from src.trainer_base import TrainerBase
 
 
 # Initialize weights as normal distrbution
@@ -80,9 +81,10 @@ def generate_random_actions(range_pos=None):
     return action, action_norm.to(dtype=torch.float32)
 
 
-class Trainer:
+class TrainerGANReS(TrainerBase):
     def __init__(self, config_dir) -> None:
-        self.config_dir = config_dir
+        super().__init__(config_dir)
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = 100
         self.generator = GeneratorActorResIm().to(self.device)
@@ -223,7 +225,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    trainer = Trainer(
+    trainer = TrainerGANReS(
         "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/config"
     )
     trainer.train()

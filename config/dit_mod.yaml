@@ -1,0 +1,35 @@
+trainer:
+  batch_size: 32
+  global_seed: 0
+  image_size: 128
+  n_epochs: 150
+  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
+  learning_rate: 0.0001
+  weight_decay: 0
+
+model:
+  type: "DiT"
+  input_size: 16
+  patch_size: 2
+  in_channels: 4
+  hidden_size: 384
+  depth: 12
+  num_heads: 6
+  mlp_ratio: 4.0
+  action_dim: 7
+  learn_sigma: true
+
+diffusion:
+  timestep_respacing: ""
+
+vae:
+  path: "stabilityai/stable-diffusion-xl-refiner-1.0"
+  subfolder: "vae"
+
+distributed:
+  backend: "nccl"
+  world_size: 2  # Adjust according to the number of GPUs
+
+wandb:
+  project: "DiT Robot Image Prediction"
+  entity: "nicorp96"

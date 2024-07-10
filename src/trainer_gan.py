@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorActor
-from models.discriminator import Discriminator
+from src.models.generator import GeneratorActor
+from src.models.discriminator import Discriminator
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from dataset.data_set import RobotDataset
+from src.dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
@@ -80,7 +80,7 @@ def generate_random_actions(range_pos=None):
     return action, action_norm.to(dtype=torch.float32)
 
 
-class Trainer:
+class TrainerGAN:
     def __init__(self, config_dir) -> None:
         # Load configuration from YAML file
         self.__load_config_file__(config_dir)
@@ -238,7 +238,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    trainer = Trainer(
+    trainer = TrainerGAN(
         "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/config/gan_img.yaml"
     )
     trainer.train()

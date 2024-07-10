@@ -1,16 +1,17 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorActor, GeneratorActor2
-from models.discriminator import DiscriminatorAuxAct
+from src.models.generator import GeneratorActor, GeneratorActor2
+from src.models.discriminator import DiscriminatorAuxAct
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from dataset.data_set import RobotDataset
+from src.dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
 import matplotlib.pyplot as plt
-from utils import unnormilize_action_torch
+from src.utils import unnormilize_action_torch
+from src.trainer_base import TrainerBase
 
 
 def weights_init(m):
@@ -22,9 +23,9 @@ def weights_init(m):
         nn.init.constant_(m.bias.data, 0)
 
 
-class Trainer:
+class TrainerGANAux(TrainerBase):
     def __init__(self, config_dir) -> None:
-        self.config_dir = config_dir
+        super().__init__(config_dir)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = 100
         self.generator = GeneratorActor().to(self.device)
@@ -213,7 +214,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    trainer = Trainer(
+    trainer = TrainerGANAux(
         "/home/nrodriguez/Documents/research-image-pred/Robot-Movement-Prediction/config"
     )
     trainer.train()

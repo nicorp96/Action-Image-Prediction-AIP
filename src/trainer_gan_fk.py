@@ -1,16 +1,17 @@
 import torch
 import torch.nn as nn
-from models.generator import GeneratorFK
-from models.discriminator import DiscriminatorFK
+from src.models.generator import GeneratorFK
+from src.models.discriminator import DiscriminatorFK
 import torch.optim as optim
 from torchvision import transforms
 from torch.utils.data import DataLoader
-from dataset.data_set import RobotDataset
+from src.dataset.data_set import RobotDataset
 import os
 import torchvision.utils as vutils
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
+from src.trainer_base import TrainerBase
 
 
 def weights_init(m):
@@ -22,10 +23,10 @@ def weights_init(m):
         nn.init.constant_(m.bias.data, 0)
 
 
-class Trainer:
+class TrainerGANFk(TrainerBase):
     def __init__(self, config_dir) -> None:
-        self.config_dir = config_dir
-        # Load configuration from YAML file
+        super().__init__(config_dir)
+
         self.__load_config_file__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_dim = self.config["noise_dim"]
@@ -206,7 +207,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    trainer = Trainer(
+    trainer = TrainerGANFk(
         "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/gan_fk.yaml"
     )
     trainer.train()

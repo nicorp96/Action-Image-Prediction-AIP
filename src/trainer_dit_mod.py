@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from dataset.data_set import RobotDataset
-from models.difussion_t import DiT
+from models.difussion_t import DiTAction
 from collections import OrderedDict
 from copy import deepcopy
 from models.difussion_utils.schedule import create_diffusion
@@ -34,34 +34,6 @@ def update_ema(ema_model, model, decay=0.9999):
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
-@torch.no_grad()
-def visualize_latent_space(data_loader, vae, device):
-    vae.eval()
-    latent_vectors = []
-    labels = []
-
-    for current_img, _, _ in data_loader:
-        current_img = current_img.to(device, dtype=torch.float32)
-        latents = vae.encode(current_img).latent_dist.sample().mul_(0.18215)
-        latent_vectors.extend(latents.cpu().numpy())
-        # Assuming labels or some form of identifier is available
-        labels.extend(current_img.cpu().numpy())
-
-    latent_vectors = np.array(latent_vectors)
-    labels = np.array(labels)
-
-    tsne = TSNE(n_components=2, random_state=0)
-    tsne_results = tsne.fit_transform(latent_vectors)
-
-    plt.figure(figsize=(10, 5))
-    plt.scatter(tsne_results[:, 0], tsne_results[:, 1], c=labels, cmap="viridis")
-    plt.colorbar()
-    plt.title("t-SNE Visualization of VAE Latent Space")
-    plt.xlabel("Dimension 1")
-    plt.ylabel("Dimension 2")
-    plt.show()
-
-
 def requires_grad(model, flag=True):
     """
     Set requires_grad flag for all parameters in a model.
@@ -84,7 +56,7 @@ class DiTTrainer:
 
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiT(
+        self.model_dit = DiTAction(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -115,15 +87,25 @@ class DiTTrainer:
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.RandomHorizontalFlip(),
+                # transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
                 transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
-
+        transform2 = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                # transforms.RandomHorizontalFlip(),
+                transforms.Resize(64),
+                transforms.CenterCrop(64),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
         # Load dataset
-        self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
+        self.dataset = RobotDataset(
+            data_path=self.data_path, transform=transform, transform_2=transform2
+        )
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -221,11 +203,16 @@ class DiTTrainer:
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = self.vae.encode(next_img).latent_dist.sample().mul_(0.18215)
+                c_img = (
+                    self.vae.encode(current_img[:1, :, :])
+                    .latent_dist.sample()
+                    .mul_(0.18215)
+                )
 
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
-            model_kwargs = dict(a=action)
+            model_kwargs = dict(a=action, img_c=c_img)
             loss_dict = self.diffusion_s.training_losses(
                 self.model_ddp, x, t, model_kwargs
             )
@@ -237,9 +224,9 @@ class DiTTrainer:
             update_ema(self.ema, self.model_ddp.module)
             running_loss += loss.item()
 
-            if step % 200 == 0:
+            if step == 100:
                 with torch.no_grad():
-                    model_kwargs = dict(a=action[:2, :])
+                    model_kwargs = dict(a=action[:2, :], img_c=c_img[:, :])
                     z = torch.randn(
                         2,
                         4,
@@ -295,11 +282,10 @@ class DiTTrainer:
 
 if __name__ == "__main__":
     trainer = DiTTrainer(
-        config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
+        config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit_mod.yaml"
     )
     # wandb.init(
     #     # project=trainer.config["wandb"]["project"],
     #     # entity=trainer.config["wandb"]["entity"],
     # )
     trainer.train()
-    # visualize_latent_space(trainer.data_loader, trainer.vae, trainer.device)

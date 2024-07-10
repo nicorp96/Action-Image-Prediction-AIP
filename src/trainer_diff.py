@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.diffusion import (
+from models.diffusion_m import (
     DiffusionForward,
     DiffusionReverse,
     UNet,
@@ -39,7 +39,6 @@ class Trainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         self.criterion = nn.MSELoss()
 
-        # Example transform
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -80,10 +79,8 @@ class Trainer:
                     ),
                     current_img=None,  # current_img,
                 )
-                # Predict noise using the model
                 predicted_noise = self.model(noisy_images, action)
 
-                # Calculate loss and update the model
                 loss = self.criterion(predicted_noise, ground_truth_noise)
                 loss.backward()
                 self.optimizer.step()

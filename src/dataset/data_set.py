@@ -4,15 +4,18 @@ import numpy as np
 
 
 class RobotDataset(Dataset):
-    def __init__(self, data_path, transform=None):
+    def __init__(self, data_path, transform=None, transform_2=None):
         self.data = np.load(
             data_path,
             allow_pickle=True,
         )
         self.transform = transform
+        self.transform2 = transform_2
         self.max = None
         self.min = None
         self._compute_max_min_actions()
+        if transform_2 is None:
+            self.transform2 = transform
 
     def _compute_max_min_actions(self):
         action_list = []
@@ -29,7 +32,7 @@ class RobotDataset(Dataset):
     def __getitem__(self, idx):
         data_obs_i = self.data[idx]
         if self.transform:
-            initial_state = self.transform(data_obs_i["image_current"])
+            initial_state = self.transform2(data_obs_i["image_current"])
             next_state = self.transform(data_obs_i["image_after_action"])
         # Normalize action
         action_torch = torch.from_numpy(data_obs_i["action"][np.newaxis, :])
