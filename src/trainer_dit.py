@@ -6,13 +6,14 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from dataset.data_set import RobotDataset
-from models.difussion_t import DiT
+from src.dataset.data_set import RobotDataset
+from src.models.difussion_t import DiT
 from collections import OrderedDict
 from copy import deepcopy
-from models.difussion_utils.schedule import create_diffusion
+from src.models.difussion_utils.schedule import create_diffusion
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
+from src.trainer_base import TrainerBase
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 import numpy as np
@@ -70,9 +71,12 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-class DiTTrainer:
-    def __init__(self, config_path, val_dataset=None):
-        self.__load_config__(config_path)
+class DiTTrainer(TrainerBase):
+    def __init__(self, config_dir, val_dataset=None):
+        super().__init__(config_dir)
+        self.__load_config__()
+        if self.config["trainer"]["wandb_log"]:
+            wandb.init()
         # Trainer settings
         self.batch_size = self.config["trainer"]["batch_size"]
         self.global_seed = self.config["trainer"]["global_seed"]
@@ -155,9 +159,9 @@ class DiTTrainer:
             weight_decay=self.config["trainer"]["weight_decay"],
         )
 
-    def __load_config__(self, config_path):
+    def __load_config__(self):
         # Load config
-        with open(config_path, "r") as file:
+        with open(self.config_dir, "r") as file:
             self.config = yaml.safe_load(file)
 
     def __setup__DDP(self, distributed_config):
@@ -200,7 +204,7 @@ class DiTTrainer:
                     best_loss = val_loss
                     self._save_checkpoint()
             else:
-                print("Without validation ds")
+                print(" ")
 
             step += 1
 
@@ -230,7 +234,8 @@ class DiTTrainer:
                 self.model_ddp, x, t, model_kwargs
             )
             loss = loss_dict["loss"].mean()
-            # wandb.log({"loss": loss})
+            if self.config["trainer"]["wandb_log"]:
+                wandb.log({"loss": loss})
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()

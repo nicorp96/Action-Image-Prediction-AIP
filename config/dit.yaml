@@ -6,6 +6,7 @@ trainer:
   data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
   learning_rate: 0.0001
   weight_decay: 0
+  wandb_log: false
 
 model:
   type: "DiT"
