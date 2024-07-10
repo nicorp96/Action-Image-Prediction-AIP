@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.manifold import TSNE
 import wandb
+import yaml
 
 
 @torch.no_grad()
@@ -70,23 +71,29 @@ def requires_grad(model, flag=True):
 
 
 class DiTTrainer:
-    def __init__(
-        self,
-        val_dataset=None,
-    ):
-        self.batch_size = 32
-        self.global_seed = 0
-        self.__setup__DDP()
+    def __init__(self, config_path, val_dataset=None):
+        self.__load_config__(config_path)
+        # Trainer settings
+        self.batch_size = self.config["trainer"]["batch_size"]
+        self.global_seed = self.config["trainer"]["global_seed"]
+        self.image_size = self.config["trainer"]["image_size"]
+        self.n_epochs = self.config["trainer"]["n_epochs"]
+        self.data_path = self.config["trainer"]["data_path"]
+
+        self.__setup__DDP(self.config["distributed"])
+
+        # Model settings
+        model_config = self.config["model"]
         self.model_dit = DiT(
-            input_size=16,
-            patch_size=2,
-            in_channels=4,
-            hidden_size=384,
-            depth=12,
-            num_heads=16,
-            mlp_ratio=4.0,
-            action_dim=7,
-            learn_sigma=True,
+            input_size=model_config["input_size"],
+            patch_size=model_config["patch_size"],
+            in_channels=model_config["in_channels"],
+            hidden_size=model_config["hidden_size"],
+            depth=model_config["depth"],
+            num_heads=model_config["num_heads"],
+            mlp_ratio=model_config["mlp_ratio"],
+            action_dim=model_config["action_dim"],
+            learn_sigma=model_config["learn_sigma"],
         )
 
         self.ema = deepcopy(self.model_dit).to(
@@ -94,19 +101,17 @@ class DiTTrainer:
         )  # Create an EMA of the model for use after training
         requires_grad(self.ema, False)
         self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
+
         self.diffusion_s = create_diffusion(
-            timestep_respacing=""
-        )  # default: 1000 steps, linear noise schedule
-        # self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(
-        #     self.device
-        # )
+            timestep_respacing=self.config["diffusion"]["timestep_respacing"]
+        )
+
+        # Load VAE
+        vae_config = self.config["vae"]
         self.vae = AutoencoderKL.from_pretrained(
-            f"stabilityai/stable-diffusion-xl-refiner-1.0", subfolder="vae"
+            vae_config["path"], subfolder=vae_config["subfolder"]
         ).to(self.device)
-        self.image_size = 128
-        self.n_epochs = 500
-        # Load dataset
-        self.data_path = "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
+
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -116,6 +121,8 @@ class DiTTrainer:
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
+
+        # Load dataset
         self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
         sampler = DistributedSampler(
             self.dataset,
@@ -124,6 +131,7 @@ class DiTTrainer:
             shuffle=True,
             seed=self.global_seed,
         )
+
         self.data_loader = DataLoader(
             self.dataset,
             batch_size=int(self.batch_size // dist.get_world_size()),
@@ -133,26 +141,34 @@ class DiTTrainer:
             pin_memory=True,
             drop_last=True,
         )
+
         self.val_loader = (
             DataLoader(val_dataset, batch_size=32, shuffle=False)
             if val_dataset
             else None
         )
+
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(
-            self.model_ddp.parameters(), lr=1e-4, weight_decay=0
+            self.model_ddp.parameters(),
+            lr=self.config["trainer"]["learning_rate"],
+            weight_decay=self.config["trainer"]["weight_decay"],
         )
 
-    def __setup__DDP(self):
+    def __load_config__(self, config_path):
+        # Load config
+        with open(config_path, "r") as file:
+            self.config = yaml.safe_load(file)
+
+    def __setup__DDP(self, distributed_config):
         assert (
             torch.cuda.is_available()
         ), "Training currently requires at least one GPU."
 
-        # Setup DDP:
-        dist.init_process_group("nccl")
+        dist.init_process_group(distributed_config["backend"])
         assert (
             self.batch_size % dist.get_world_size() == 0
-        ), f"Batch size must be divisible by world size."
+        ), f"Batch size must be divisible by the world size."
         self.rank = dist.get_rank()
         self.device = self.rank % torch.cuda.device_count()
         self.seed = self.global_seed * dist.get_world_size() + self.rank
@@ -205,6 +221,7 @@ class DiTTrainer:
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = self.vae.encode(next_img).latent_dist.sample().mul_(0.18215)
+                # c_img = self.vae.encode(current_img).latent_dist.sample().mul_(0.18215)
 
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
@@ -223,7 +240,9 @@ class DiTTrainer:
 
             if step % 200 == 0:
                 with torch.no_grad():
-                    model_kwargs = dict(a=action[:2, :])
+                    model_kwargs = dict(
+                        a=action[:2, :]
+                    )  # , img_c=current_img[:2, :, :])
                     z = torch.randn(
                         2,
                         4,
@@ -278,13 +297,14 @@ class DiTTrainer:
         print("Checkpoint saved!")
 
 
-# Example usage
 if __name__ == "__main__":
-    # Define transformations for images (Normalize etc.)
-
     # Initialize the trainer
-    trainer = DiTTrainer()
-    wandb.init()
-    # Train the model
+    trainer = DiTTrainer(
+        config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
+    )
+    wandb.init(
+        # project=trainer.config["wandb"]["project"],
+        # entity=trainer.config["wandb"]["entity"],
+    )
     trainer.train()
     # visualize_latent_space(trainer.data_loader, trainer.vae, trainer.device)
