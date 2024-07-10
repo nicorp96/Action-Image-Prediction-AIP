@@ -7,6 +7,6 @@ fixed_noise_samples: 5
 criterion: "BCE"
 num_epochs: 600
 image_size: 64
-data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/panda_ds.npy"
+data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
 save_dir: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/results/gan_nm"
 batch_size: 64
