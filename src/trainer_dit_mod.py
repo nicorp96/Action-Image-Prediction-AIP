@@ -56,9 +56,12 @@ class DiTTrainerMod(TrainerBase):
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
         self.data_path = self.config["trainer"]["data_path"]
-
-        self.__setup__DDP(self.config["distributed"])
-
+        self.cuda_num = self.config["trainer"]["cuda_num"]
+        # self.__setup__DDP(self.config["distributed"])
+        dist.init_process_group(self.config["distributed"]["backend"])
+        self.device = torch.device(
+            f"cuda:{self.cuda_num}" if torch.cuda.is_available() else "cpu"
+        )
         # Model settings
         model_config = self.config["model"]
         self.model_dit = DiTAction(
@@ -72,12 +75,12 @@ class DiTTrainerMod(TrainerBase):
             action_dim=model_config["action_dim"],
             learn_sigma=model_config["learn_sigma"],
         )
-
+        self.model_dit.to(self.device)
         self.ema = deepcopy(self.model_dit).to(
             self.device
         )  # Create an EMA of the model for use after training
         requires_grad(self.ema, False)
-        self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
+        # self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
 
         self.diffusion_s = create_diffusion(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"]
@@ -92,7 +95,7 @@ class DiTTrainerMod(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                # transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
                 transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -101,7 +104,7 @@ class DiTTrainerMod(TrainerBase):
         transform2 = transforms.Compose(
             [
                 transforms.ToTensor(),
-                # transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(),
                 transforms.Resize(64),
                 transforms.CenterCrop(64),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -111,19 +114,19 @@ class DiTTrainerMod(TrainerBase):
         self.dataset = RobotDataset(
             data_path=self.data_path, transform=transform, transform_2=transform2
         )
-        sampler = DistributedSampler(
-            self.dataset,
-            num_replicas=dist.get_world_size(),
-            rank=self.rank,
-            shuffle=True,
-            seed=self.global_seed,
-        )
+        # sampler = DistributedSampler(
+        #     self.dataset,
+        #     num_replicas=dist.get_world_size(),
+        #     rank=self.rank,
+        #     shuffle=True,
+        #     seed=self.global_seed,
+        # )
 
         self.data_loader = DataLoader(
             self.dataset,
             batch_size=int(self.batch_size // dist.get_world_size()),
             shuffle=False,
-            sampler=sampler,
+            # sampler=sampler,
             num_workers=2,
             pin_memory=True,
             drop_last=True,
@@ -137,7 +140,7 @@ class DiTTrainerMod(TrainerBase):
 
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(
-            self.model_ddp.parameters(),
+            self.model_dit.parameters(),
             lr=self.config["trainer"]["learning_rate"],
             weight_decay=self.config["trainer"]["weight_decay"],
         )
@@ -168,9 +171,9 @@ class DiTTrainerMod(TrainerBase):
     def train(self):
         # Prepare models for training:
         update_ema(
-            self.ema, self.model_ddp.module, decay=0
+            self.ema, self.model_dit, decay=0
         )  # Ensure EMA is initialized with synced weights
-        self.model_ddp.train()  # important! This enables embedding dropout for classifier-free guidance
+        self.model_dit.train()  # important! This enables embedding dropout for classifier-free guidance
         self.ema.eval()  # EMA model should always be in eval mode
         best_loss = float("inf")
         step = 0
@@ -191,11 +194,11 @@ class DiTTrainerMod(TrainerBase):
 
             step += 1
 
-        self.model_ddp.eval()
+        self.model_dit.eval()
         self._save_checkpoint()
 
     def _train_one_epoch(self, step):
-        self.model_ddp.train()
+        self.model_dit.train()
         running_loss = 0.0
         for current_img, next_img, action in tqdm(self.data_loader, desc="Training"):
             current_img, next_img, action = (
@@ -218,7 +221,7 @@ class DiTTrainerMod(TrainerBase):
             )
             model_kwargs = dict(a=action, img_c=c_img)
             loss_dict = self.diffusion_s.training_losses(
-                self.model_ddp, x, t, model_kwargs
+                self.model_dit, x, t, model_kwargs
             )
             loss = loss_dict["loss"].mean()
             if self.config["trainer"]["wandb_log"]:
@@ -226,10 +229,10 @@ class DiTTrainerMod(TrainerBase):
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-            update_ema(self.ema, self.model_ddp.module)
+            update_ema(self.ema, self.model_dit)
             running_loss += loss.item()
 
-            if step == 999:
+            if step == 1999:
                 with torch.no_grad():
                     model_kwargs = dict(a=action[:2, :], img_c=c_img[:, :])
                     z = torch.randn(
