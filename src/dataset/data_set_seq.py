@@ -4,20 +4,50 @@ import numpy as np
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import torchvision.utils as vutils
+import torch.nn.functional as F
 import os
 
 
 class RobotDatasetSeq(Dataset):
-    def __init__(self, data_path, transform=None, img_size=64):
+    def __init__(self, data_path, transform=None, img_size=64, seq_l=10):
         self.data = np.load(
             data_path,
             allow_pickle=True,
         )
+
         self.transform = transform
         self.max = None
         self.min = None
         self.img_size = img_size
+        self.sequence_l = seq_l
+        self.__pre_process_data__()
         self._compute_max_min_actions()
+
+    @staticmethod
+    def extract_first_last_random_frames_tensor(frames, k):
+        l, w, h, c = frames.shape
+
+        if k > l:
+            raise ValueError("k cannot be greater than the sequence length (l).")
+
+        if k < 2:
+            raise ValueError(
+                "k should be at least 2 to include the first and last frame."
+            )
+
+        # Always include the first and last frame
+        selected_indices = [0, l - 1]
+
+        # Randomly select the remaining (k - 2) unique indices from the range [1, l-1)
+        remaining_indices = torch.randperm(l - 2)[: k - 2] + 1
+
+        # Combine the indices
+        selected_indices.extend(remaining_indices.tolist())
+
+        # Index the tensor with the selected indices to get the random frames
+        random_frames = frames[selected_indices, :, :, :]
+
+        return random_frames
 
     def _compute_max_min_actions(self):
         action_list = []
@@ -31,18 +61,27 @@ class RobotDatasetSeq(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def __pre_process_data__(self):
+        indexes = []
+        for idx in range(len(self.data)):
+            s, w, h, c = self.data[idx]["image_after_action"].shape
+            if s < 11:
+                indexes.append(idx)
+        self.data = np.delete(self.data, indexes)
+
     def __getitem__(self, idx):
         data_obs_i = self.data[idx]
         s, w, h, c = data_obs_i["image_after_action"].shape
-        print(s)
         data_trans = torch.zeros((s, c, self.img_size, self.img_size))
         if self.transform:
             initial_img = self.transform(data_obs_i["image_current"])
-            for idx in range(s):
-                data_i = data_obs_i["image_after_action"][idx, :, :, :]
-                data_trans[idx, :, :, :] = self.transform(data_i)
-        # Normalize action
+            data_trans = torch.stack(
+                [self.transform(img) for img in data_obs_i["image_after_action"]]
+            )
 
+        data_trans = self.extract_first_last_random_frames_tensor(
+            data_trans, self.sequence_l
+        )
         action_torch = torch.from_numpy(data_obs_i["action"][np.newaxis, :])
         action_nm = self.normalize_action_torch(
             action_torch,
@@ -53,7 +92,7 @@ class RobotDatasetSeq(Dataset):
             initial_img,
             data_trans,
             action_nm,
-        )  # data_obs_i["action"]
+        )
 
     @staticmethod
     def normalize_action_torch(
@@ -89,27 +128,53 @@ class RobotDatasetSeq(Dataset):
         return actions_normalized
 
 
+def collate_fn(batch):
+    current_images, next_images, actions = zip(*batch)
+
+    # Find the maximum sequence length in this batch
+    max_seq_len = max([seq.shape[0] for seq in next_images])
+
+    # Pad sequences
+    padded_next_images = []
+    for seq in next_images:
+        padding = (0, 0, 0, 0, 0, 0, 0, max_seq_len - seq.shape[0])
+        padded_seq = F.pad(seq, padding, "constant", 0)  # Pad with 0s
+        padded_next_images.append(padded_seq)
+
+    padded_next_images = torch.stack(padded_next_images)
+    current_images = torch.stack(current_images)
+    actions = torch.stack(actions)
+
+    return current_images, padded_next_images, actions
+
+
 if __name__ == "__main__":
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Resize(64),
+            transforms.Resize((64, 64)),  # Resize to (H, W)
             transforms.CenterCrop(64),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ]
     )
+
     rd_ds = RobotDatasetSeq(
         data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds_seq.npy",
         transform=transform,
     )
-    data_loader = DataLoader(rd_ds, batch_size=64, shuffle=True)
+
+    data_loader = DataLoader(rd_ds, batch_size=64, shuffle=True, collate_fn=collate_fn)
+
     for step, (current_image, next_image, action) in enumerate(data_loader):
+        print(next_image.size())
         image_path = os.path.join(
-            "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/w",
-            f"/img_{step}.png",
+            "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/w/",
+            f"img_{step}.png",
         )
         vutils.save_image(
-            next_image,
+            next_image.view(
+                -1, next_image.size(-3), next_image.size(-2), next_image.size(-1)
+            ),
             image_path,
             normalize=True,
         )
