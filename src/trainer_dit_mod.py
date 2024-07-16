@@ -57,6 +57,8 @@ class DiTTrainerMod(TrainerBase):
         self.n_epochs = self.config["trainer"]["n_epochs"]
         self.data_path = self.config["trainer"]["data_path"]
         self.cuda_num = self.config["trainer"]["cuda_num"]
+        self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
+        self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
         # self.__setup__DDP(self.config["distributed"])
         dist.init_process_group(self.config["distributed"]["backend"])
         self.device = torch.device(
@@ -254,15 +256,15 @@ class DiTTrainerMod(TrainerBase):
                     samples = self.vae.decode(samples / 0.18215).sample
                     save_image(
                         samples,
-                        f"results/diffusion_dit/gen/epoch_{step}.png",
-                        nrow=4,
+                        self.eval_save_gen_dir + f"_{step}.png",
+                        nrow=2,
                         normalize=True,
                         value_range=(-1, 1),
                     )
                     save_image(
                         next_img[:2, :, :],
-                        f"results/diffusion_dit/real/epoch_{step}.png",
-                        nrow=4,
+                        self.eval_save_real_dir + f"_{step}.png",
+                        nrow=2,
                         normalize=True,
                         value_range=(-1, 1),
                     )

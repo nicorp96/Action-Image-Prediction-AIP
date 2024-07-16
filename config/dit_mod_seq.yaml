@@ -1,24 +1,23 @@
 trainer:
   batch_size: 32
   global_seed: 0
-  image_size: 128
+  image_size: 64
   n_epochs: 2000
-  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds.npy"
-  eval_save_real: "results/diffusion_dit_wo/real/epoch"
-  eval_save_gen: "results/diffusion_dit_wo/gen/epoch"
+  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds_seq.npy"
+  eval_save_real: "results/diffusion_seq/real/epoch"
+  eval_save_gen: "results/diffusion_seq/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 1
   wandb_log: false
-  
 
 model:
   type: "DiT"
-  input_size: 16
+  input_size: 8
   patch_size: 2
   in_channels: 4
   hidden_size: 384
-  depth: 12
+  depth: 4
   num_heads: 6
   mlp_ratio: 4.0
   action_dim: 7

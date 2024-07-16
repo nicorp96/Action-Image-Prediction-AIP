@@ -6,11 +6,11 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.dataset.data_set import RobotDataset
-from src.models.difussion_t import DiT
+from src.dataset.data_set_seq import RobotDatasetSeq
+from src.models.difussion_t import DiTActionSeq
 from collections import OrderedDict
 from copy import deepcopy
-from src.models.difussion_utils.schedule import create_diffusion
+from src.models.difussion_utils.schedule import create_diffusion_seq
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
@@ -20,6 +20,7 @@ import numpy as np
 from sklearn.manifold import TSNE
 import wandb
 import yaml
+from einops import rearrange
 
 
 @torch.no_grad()
@@ -88,7 +89,7 @@ class DiTTrainerV(TrainerBase):
 
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiT(
+        self.model_dit = DiTActionSeq(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -100,13 +101,16 @@ class DiTTrainerV(TrainerBase):
             learn_sigma=model_config["learn_sigma"],
         )
 
+        self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
+        self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
+
         self.ema = deepcopy(self.model_dit).to(
             self.device
         )  # Create an EMA of the model for use after training
         requires_grad(self.ema, False)
         self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
 
-        self.diffusion_s = create_diffusion(
+        self.diffusion_s = create_diffusion_seq(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"]
         )
 
@@ -119,7 +123,7 @@ class DiTTrainerV(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.RandomHorizontalFlip(),
+                # transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
                 transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -127,7 +131,7 @@ class DiTTrainerV(TrainerBase):
         )
 
         # Load dataset
-        self.dataset = RobotDataset(data_path=self.data_path, transform=transform)
+        self.dataset = RobotDatasetSeq(data_path=self.data_path, transform=transform)
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -215,21 +219,23 @@ class DiTTrainerV(TrainerBase):
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for current_img, next_img, action in tqdm(self.data_loader, desc="Training"):
-            current_img, next_img, action = (
+        for current_img, next_seq, action in tqdm(self.data_loader, desc="Training"):
+            current_img, next_seq, action = (
                 current_img.to(device=self.device, dtype=torch.float32),
-                next_img.to(self.device, dtype=torch.float32),
+                next_seq.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
             )
 
             with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = self.vae.encode(next_img).latent_dist.sample().mul_(0.18215)
+                b, _, _, _, _ = next_seq.shape
+                x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
+                x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
+                x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
 
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
-            model_kwargs = dict(a=action)
+            model_kwargs = dict(a=action, mask_frame_num=2)
             loss_dict = self.diffusion_s.training_losses(
                 self.model_ddp, x, t, model_kwargs
             )
@@ -244,12 +250,9 @@ class DiTTrainerV(TrainerBase):
 
             if step % 200 == 0:
                 with torch.no_grad():
-                    model_kwargs = dict(a=action[:2, :])
-                    z = torch.randn(
-                        2,
-                        4,
-                        self.image_size // 8,
-                        self.image_size // 8,
+                    model_kwargs = dict(a=action, mask_frame_num=2)
+                    z = torch.randn_like(
+                        x,
                         device=self.device,
                     )
                     samples = self.diffusion_s.p_sample_loop(
@@ -260,19 +263,25 @@ class DiTTrainerV(TrainerBase):
                         progress=True,
                         model_kwargs=model_kwargs,
                     )
-                    # samples, _ = samples.chunk(2, dim=0)
+                    samples = rearrange(
+                        samples, "b f c h w -> (b f) c h w"
+                    ).contiguous()
                     samples = self.vae.decode(samples / 0.18215).sample
+                    samples = rearrange(
+                        samples, "(b f) c h w -> b f c h w", b=b
+                    ).contiguous()
+                    batchsize = np.random.choice(b)
                     save_image(
-                        samples,
-                        f"results/diffusion_dit/gen/epoch_{step}.png",
-                        nrow=4,
+                        samples[batchsize, :, :, :, :],
+                        self.eval_save_gen_dir + f"_{step}.png",
+                        nrow=5,
                         normalize=True,
                         value_range=(-1, 1),
                     )
                     save_image(
-                        next_img[:2, :, :],
-                        f"results/diffusion_dit/real/epoch_{step}.png",
-                        nrow=4,
+                        next_seq[batchsize, :, :, :, :],
+                        self.eval_save_real_dir + f"_{step}.png",
+                        nrow=5,
                         normalize=True,
                         value_range=(-1, 1),
                     )
