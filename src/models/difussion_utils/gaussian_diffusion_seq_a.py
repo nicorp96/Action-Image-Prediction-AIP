@@ -5,7 +5,7 @@ import torch
 from . import gaussian_diffusion as gd
 
 
-class GaussianDiffusionSeq:
+class GaussianDiffusionSeqAct:
     """
     Utilities for training and sampling diffusion models.
     Original ported from this codebase:
@@ -125,7 +125,7 @@ class GaussianDiffusionSeq:
         the initial x, x_0.
         :param model: the model, which takes a signal and a batch of timesteps
                       as input.
-        :param x: the [N x F x C x ...] tensor at time t.
+        :param x: the [N x C x ...] tensor at time t.
         :param t: a 1-D Tensor of timesteps.
         :param clip_denoised: if True, clip the denoised signal into [-1, 1].
         :param denoised_fn: if not None, a function which applies to the
@@ -790,122 +790,3 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res + torch.zeros(broadcast_shape, device=timesteps.device)
-
-
-class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
-    def __init__(self, *, betas, model_mean_type, model_var_type, loss_type):
-        super().__init__(
-            betas=betas,
-            model_mean_type=model_mean_type,
-            model_var_type=model_var_type,
-            loss_type=loss_type,
-        )
-
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
-        """
-        Compute training losses for a single timestep.
-        :param model: the model to evaluate loss on.
-        :param x_start: the [N x F x C x ...] tensor of inputs.
-        :param t: a batch of timestep indices.
-        :param model_kwargs: if not None, a dict of extra keyword arguments to
-            pass to the model. This can be used for conditioning.
-        :param noise: if specified, the specific Gaussian noise to try to remove.
-        :return: a dict with the key "loss" containing a tensor of shape [N].
-                 Some mean or variance settings may also have other keys.
-        """
-        if model_kwargs is None:
-            model_kwargs = {}
-
-        mask_frame_num = model_kwargs["mask_frame_num"]
-        x_action = model_kwargs["a"]
-
-        if noise is None:
-            # noise = torch.randn_like(x_start)
-            unmask_noise = torch.randn_like(x_start[:, mask_frame_num:, :])
-            action_noised = torch.rand_like(x_action)
-
-        terms = {}
-
-        mask_x_x_start, unmask_x_start = (
-            x_start[:, 0:mask_frame_num, :],
-            x_start[:, mask_frame_num:, :],
-        )
-
-        unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
-        x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-
-        a_t = self.q_sample(x_action, t, noise=action_noised)
-
-        if (
-            self.loss_type == gd.LossType.KL
-            or self.loss_type == gd.LossType.RESCALED_KL
-        ):
-            terms["loss"] = self._vb_terms_bpd(
-                model=model,
-                x_start=x_start,
-                x_t=x_t,
-                t=t,
-                clip_denoised=False,
-                model_kwargs=model_kwargs,
-            )["output"]
-            if self.loss_type == gd.LossType.RESCALED_KL:
-                terms["loss"] *= self.num_timesteps
-        elif (
-            self.loss_type == gd.LossType.MSE
-            or self.loss_type == gd.LossType.RESCALED_MSE
-        ):
-            model_output = model(x_t, t, **model_kwargs)
-
-            if self.model_var_type in [
-                gd.ModelVarType.LEARNED,
-                gd.ModelVarType.LEARNED_RANGE,
-            ]:
-                B, F, C = x_t.shape[:3]
-                assert model_output.shape == (B, F, C * 2, *x_t.shape[3:])
-                model_output, model_var_values = torch.split(model_output, C, dim=2)
-                # Learn the variance using the variational bound, but don't let
-                # it affect our mean prediction.
-                frozen_out = torch.cat(
-                    [
-                        model_output[:, mask_frame_num:].detach(),
-                        model_var_values[:, mask_frame_num:],
-                    ],
-                    dim=2,
-                )
-                terms["vb"] = self._vb_terms_bpd(
-                    model=lambda *args, r=frozen_out: r,
-                    x_start=x_start[:, mask_frame_num:],
-                    x_t=x_t[:, mask_frame_num:],
-                    t=t,
-                    clip_denoised=False,
-                )["output"]
-                if self.loss_type == gd.LossType.RESCALED_MSE:
-                    # Divide by 1000 for equivalence with initial implementation.
-                    # Without a factor of 1/1000, the VB term hurts the MSE term.
-                    terms["vb"] *= self.num_timesteps / 1000.0
-
-            target = {
-                gd.ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                    x_start=x_start[:, mask_frame_num:],
-                    x_t=x_t[:, mask_frame_num:],
-                    t=t,
-                )[0],
-                gd.ModelMeanType.START_X: x_start[:, mask_frame_num:],
-                gd.ModelMeanType.EPSILON: unmask_noise,
-            }[self.model_mean_type]
-            assert (
-                model_output[:, mask_frame_num:].shape
-                == target.shape
-                == x_start[:, mask_frame_num:].shape
-            )
-            terms["mse"] = gd.mean_flat(
-                (target - model_output[:, mask_frame_num:, :, :, :]) ** 2
-            )
-            if "vb" in terms:
-                terms["loss"] = terms["mse"] + terms["vb"]
-            else:
-                terms["loss"] = terms["mse"]
-        else:
-            raise NotImplementedError(self.loss_type)
-
-        return terms

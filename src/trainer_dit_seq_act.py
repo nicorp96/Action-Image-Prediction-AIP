@@ -1,12 +1,12 @@
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.dataset.data_set_seq import RobotDatasetSeq, collate_fn
+from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
 from src.models.difussion_t import DiTActionSeq
 from collections import OrderedDict
 from copy import deepcopy
@@ -72,7 +72,7 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-class DiTTrainerV(TrainerBase):
+class DiTTrainerScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
@@ -131,7 +131,9 @@ class DiTTrainerV(TrainerBase):
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeq(data_path=self.data_path, transform=transform)
+        self.dataset = RobotDatasetSeqScene(
+            data_path=self.data_path, transform=transform
+        )
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -148,6 +150,7 @@ class DiTTrainerV(TrainerBase):
             num_workers=2,
             pin_memory=True,
             drop_last=True,
+            collate_fn=collate_fn,
         )
 
         self.val_loader = (
@@ -235,6 +238,7 @@ class DiTTrainerV(TrainerBase):
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
+
             model_kwargs = dict(a=action, mask_frame_num=2)
             loss_dict = self.diffusion_s.training_losses(
                 self.model_ddp, x, t, model_kwargs
@@ -309,7 +313,7 @@ class DiTTrainerV(TrainerBase):
 
 
 if __name__ == "__main__":
-    trainer = DiTTrainerV(
+    trainer = DiTTrainerScene(
         config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
     )
     # wandb.init(

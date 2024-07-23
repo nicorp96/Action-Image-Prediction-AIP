@@ -1,0 +1,39 @@
+trainer:
+  batch_size: 32
+  global_seed: 0
+  image_size: 128
+  n_epochs: 2000
+  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene"
+  eval_save_real: "results/diffusion_seq_scene/real/epoch"
+  eval_save_gen: "results/diffusion_seq_scene/gen/epoch"
+  learning_rate: 0.0001
+  weight_decay: 0
+  cuda_num: 1
+  wandb_log: false
+
+model:
+  type: "DiT"
+  input_size: 8
+  patch_size: 2
+  in_channels: 4
+  hidden_size: 384
+  depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  action_dim: 7
+  learn_sigma: true
+
+diffusion:
+  timestep_respacing: ""
+
+vae:
+  path: "stabilityai/stable-diffusion-xl-refiner-1.0"
+  subfolder: "vae"
+
+distributed:
+  backend: "nccl"
+  world_size: 1  # Adjust according to the number of GPUs
+
+wandb:
+  project: "DiT Robot Image Prediction"
+  entity: "nicorp96"
