@@ -2,6 +2,7 @@ from src.trainer_dit import DiTTrainer
 from src.trainer_dit_mod import DiTTrainerMod
 from src.trainer_dit_seq import DiTTrainerV
 from src.trainer_dit_seq_act import DiTTrainerScene
+from src.trainer_dit_seq_act_frames import DiTTrainerActFrames
 import os
 import wandb
 
@@ -12,6 +13,7 @@ def get_trainer(trainer_type, config):
         "DiTTrainerMod": DiTTrainerMod,
         "DiTTrainerV": DiTTrainerV,
         "DiTTrainerScene": DiTTrainerScene,
+        "DiTTrainerActFrames": DiTTrainerActFrames,
     }
     if trainer_type in trainers:
         return trainers[trainer_type](config)
@@ -21,9 +23,9 @@ def get_trainer(trainer_type, config):
 
 def main():
     try:
-        config = "config/dit_mod_seq_scene.yaml"
+        config = "config/dit_mod_seq_act_frames.yaml"
 
-        trainer_name = "DiTTrainerScene"
+        trainer_name = "DiTTrainerActFrames"
         base_dir = os.getcwd()
 
         # Default configuration for demonstration

@@ -596,7 +596,6 @@ class DiTActionSeqAct(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
         return imgs
 
-    # TODO: Add current image as embedding https://github.com/homangab/Track-2-Act/blob/main/single_script.py
     def forward(self, x, t, a, mask_frame_num=None):
         """
         Forward pass of DiT which now also takes actions as input
@@ -619,6 +618,86 @@ class DiTActionSeqAct(nn.Module):
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
         return x
+
+
+class DiTActionFramesSeq(DiTActionSeqAct):
+    def __init__(
+        self,
+        input_size=16,
+        patch_size=4,
+        in_channels=4,
+        hidden_size=1152,
+        depth=28,
+        num_heads=16,
+        mlp_ratio=4,
+        action_dim=6,
+        learn_sigma=True,
+        seq_l=16,
+    ):
+        super().__init__(
+            input_size,
+            patch_size,
+            in_channels,
+            hidden_size,
+            depth,
+            num_heads,
+            mlp_ratio,
+            action_dim,
+            learn_sigma,
+        )
+        self.seq_length = seq_l
+        self.pos_embed_act = nn.Parameter(
+            torch.zeros(1, 16, hidden_size), requires_grad=False
+        )
+        pos_embed_act = get_2d_sincos_pos_embed(
+            self.pos_embed_act.shape[-1], int(self.seq_length**0.5)
+        )
+        self.pos_embed_act.data.copy_(
+            torch.from_numpy(pos_embed_act).float().unsqueeze(0)
+        )
+        self.img_c_embedder = nn.Linear(256, hidden_size)
+        self.final_layer_act = FinalLayer(hidden_size, self.seq_length + 1, action_dim)
+        self.downsample_layer = nn.Linear(2023, 7)
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer_act.linear.weight, 0)
+        nn.init.constant_(self.final_layer_act.linear.bias, 0)
+        nn.init.normal_(self.downsample_layer.weight, std=0.02)
+
+    def forward(self, x, t, a, img_c, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+
+        a = self.a_embedder(a) + self.pos_embed_act  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        a = rearrange(a, "b f d -> (b f) d")
+        a = repeat(a, "b d -> b c d", c=1)
+        x = torch.cat((x, a), dim=1)
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        y_feat = img_c.flatten(start_dim=1)
+        y_emb = self.img_c_embedder(y_feat)
+        c = timestep_spatial + y_emb
+        for block in self.blocks:
+            x_b = block(x, c)  # (N, T, D)
+
+        x = self.final_layer(
+            x_b[:, :-1, :], c
+        )  # (N, T, patch_size ** 2 * out_channels)
+        x_act = self.final_layer_act(x_b[:, 15:16, :], c)
+        x_act = torch.einsum("nhw->nhw", x_act)
+        x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
+        x_act = self.downsample_layer(x_act)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x, x_act
 
 
 #################################################################################

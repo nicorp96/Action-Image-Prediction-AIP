@@ -801,6 +801,371 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             loss_type=loss_type,
         )
 
+    def condition_mean_act(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
+        """
+        Compute the mean for the previous step, given a function cond_fn that
+        computes the gradient of a conditional log probability with respect to
+        x. In particular, cond_fn computes grad(log(p(y|x))), and we want to
+        condition on y.
+        This uses the conditioning strategy from Sohl-Dickstein et al. (2015).
+        """
+        gradient = cond_fn(x, t, **model_kwargs)
+        new_mean = (
+            p_mean_var["mean"].float() + p_mean_var["variance"] * gradient.float()
+        )
+        return new_mean
+
+    def p_mean_variance(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        act=None,
+        without_action=True,
+    ):
+        """
+        Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
+        the initial x, x_0.
+        :param model: the model, which takes a signal and a batch of timesteps
+                      as input.
+        :param x: the [N x F x C x ...] tensor at time t.
+        :param t: a 1-D Tensor of timesteps.
+        :param clip_denoised: if True, clip the denoised signal into [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample. Applies before
+            clip_denoised.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :return: a dict with the following keys:
+                 - 'mean': the model mean output.
+                 - 'variance': the model variance output.
+                 - 'log_variance': the log of 'variance'.
+                 - 'pred_xstart': the prediction for x_0.
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        B, F, C = x.shape[:3]
+        action = act if act is not None else None
+
+        assert t.shape == (B,)
+        model_output = model(x, t, **model_kwargs)
+        if isinstance(model_output, tuple):
+            model_output, act_out = model_output
+        else:
+            act_out = None
+
+        if self.model_var_type in [
+            gd.ModelVarType.LEARNED,
+            gd.ModelVarType.LEARNED_RANGE,
+        ]:
+            assert model_output.shape == (B, F, C * 2, *x.shape[3:])
+
+            model_output, model_var_values = torch.split(model_output, C, dim=2)
+            min_log = _extract_into_tensor(
+                self.posterior_log_variance_clipped, t, x.shape
+            )
+            max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
+            # The model_var_values is [-1, 1] for [min_var, max_var].
+            frac = (model_var_values + 1) / 2
+            model_log_variance = frac * max_log + (1 - frac) * min_log
+            model_variance = torch.exp(model_log_variance)
+
+            act_variance, act_log_variance = {
+                # for fixedlarge, we set the initial (log-)variance like so
+                # to get a better decoder log likelihood.
+                gd.ModelVarType.FIXED_LARGE: (
+                    np.append(self.posterior_variance[1], self.betas[1:]),
+                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
+                ),
+                gd.ModelVarType.FIXED_SMALL: (
+                    self.posterior_variance,
+                    self.posterior_log_variance_clipped,
+                ),
+            }[gd.ModelVarType.FIXED_LARGE]
+            act_variance = _extract_into_tensor(act_variance, t, action.shape)
+            act_log_variance = _extract_into_tensor(act_log_variance, t, action.shape)
+
+        else:
+            model_variance, model_log_variance = {
+                # for fixedlarge, we set the initial (log-)variance like so
+                # to get a better decoder log likelihood.
+                gd.ModelVarType.FIXED_LARGE: (
+                    np.append(self.posterior_variance[1], self.betas[1:]),
+                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
+                ),
+                gd.ModelVarType.FIXED_SMALL: (
+                    self.posterior_variance,
+                    self.posterior_log_variance_clipped,
+                ),
+            }[self.model_var_type]
+            model_variance = _extract_into_tensor(model_variance, t, x.shape)
+            model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+
+        def process_xstart(x):
+            if denoised_fn is not None:
+                x = denoised_fn(x)
+            if clip_denoised:
+                return x.clamp(-1, 1)
+            return x
+
+        if self.model_mean_type == gd.ModelMeanType.START_X:
+            pred_xstart = process_xstart(model_output)
+        else:
+            pred_xstart = process_xstart(
+                self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
+            )
+            pred_act = (
+                None
+                if without_action
+                else process_xstart(
+                    self._predict_xstart_from_eps(x_t=action, t=t, eps=act_out)
+                )
+            )
+        model_mean, _, _ = self.q_posterior_mean_variance(
+            x_start=pred_xstart, x_t=x, t=t
+        )
+
+        act_mean, _, _ = (
+            (None, None, None)
+            if without_action
+            else self.q_posterior_mean_variance(x_start=pred_act, x_t=action, t=t)
+        )
+
+        assert (
+            model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
+        )
+        if not without_action:
+            assert (
+                act_mean.shape
+                == act_log_variance.shape
+                == pred_act.shape
+                == action.shape
+            )
+        return {
+            "mean": model_mean,
+            "variance": model_variance,
+            "log_variance": model_log_variance,
+            "pred_xstart": pred_xstart,
+            "act_mean": act_mean,
+            "act_variance": act_variance,
+            "act_log_variance": act_log_variance,
+            "pred_act": pred_act,
+        }
+
+    def p_sample_loop(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        """
+        Generate samples from the model.
+        :param model: the model module.
+        :param shape: the shape of the samples, (N, C, H, W).
+        :param noise: if specified, the noise from the encoder to sample.
+                      Should be of the same shape as `shape`.
+        :param clip_denoised: if True, clip x_start predictions to [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample.
+        :param cond_fn: if not None, this is a gradient function that acts
+                        similarly to the model.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :param device: if specified, the device to create the samples on.
+                       If not specified, use a model parameter's device.
+        :param progress: if True, show a tqdm progress bar.
+        :return: a non-differentiable batch of samples.
+        """
+        final = None
+
+        for sample in self.p_sample_loop_progressive(
+            model,
+            shape,
+            noise=noise,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            cond_fn=cond_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+        ):
+            final = sample
+        return final["sample"], final["sample_act"]
+
+    def p_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+    ):
+        """
+        Sample x_{t-1} from the model at the given timestep.
+        :param model: the model to sample from.
+        :param x: the current tensor at x_{t-1}.
+        :param t: the value of t, starting at 0 for the first diffusion step.
+        :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample.
+        :param cond_fn: if not None, this is a gradient function that acts
+                        similarly to the model.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :return: a dict containing the following keys:
+                 - 'sample': a random sample from the model.
+                 - 'pred_xstart': a prediction of x_0.
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            act=model_kwargs["a"],
+            without_action=False,
+        )
+        noise = torch.randn_like(x)
+        noise_act = torch.randn_like(model_kwargs["a"])
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        nonzero_mask_act = (
+            (t != 0).float().view(-1, *([1] * (len(model_kwargs["a"].shape) - 1)))
+        )
+        if cond_fn is not None:
+            out["mean"] = self.condition_mean(
+                cond_fn, out, x, t, model_kwargs=model_kwargs
+            )
+            out["act_mean"] = self.condition_mean_act(
+                cond_fn, out, x, t, model_kwargs=model_kwargs
+            )
+        sample = (
+            out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
+        )
+
+        sample_act = (
+            out["act_mean"]
+            + nonzero_mask_act * torch.exp(0.5 * out["act_log_variance"]) * noise_act
+        )
+        return {
+            "sample": sample,
+            "pred_xstart": out["pred_xstart"],
+            "sample_act": sample_act,
+            "pred_act": out["pred_act"],
+        }
+
+    def p_sample_loop_progressive(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        """
+        Generate samples from the model and yield intermediate samples from
+        each timestep of diffusion.
+        Arguments are the same as p_sample_loop().
+        Returns a generator over dicts, where each dict is the return value of
+        p_sample().
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        if noise is not None:
+            img = noise
+            actions = model_kwargs["a"]
+        else:
+            img = torch.randn(*shape, device=device)
+        indices = list(range(self.num_timesteps))[::-1]
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = torch.tensor([i] * shape[0], device=device)
+            with torch.no_grad():
+                out = self.p_sample(
+                    model,
+                    img,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                )
+                yield out
+                img = out["sample"]
+                model_kwargs["a"] = out["sample_act"]
+
+    def _vb_terms_bpd(
+        self,
+        model,
+        x_start,
+        x_t,
+        t,
+        clip_denoised=True,
+        model_kwargs=None,
+        action=None,
+        whitout_action=True,
+    ):
+        """
+        Get a term for the variational lower-bound.
+        The resulting units are bits (rather than nats, as one might expect).
+        This allows for comparison to other papers.
+        :return: a dict with the following keys:
+                 - 'output': a shape [N] tensor of NLLs or KLs.
+                 - 'pred_xstart': the x_0 predictions.
+        """
+        true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
+            x_start=x_start, x_t=x_t, t=t
+        )
+        out = self.p_mean_variance(
+            model,
+            x_t,
+            t,
+            clip_denoised=clip_denoised,
+            model_kwargs=model_kwargs,
+            act=action,
+            without_action=True,
+        )
+        kl = gd.normal_kl(
+            true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
+        )
+        kl = gd.mean_flat(kl) / np.log(2.0)
+
+        decoder_nll = -gd.discretized_gaussian_log_likelihood(
+            x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
+        )
+        assert decoder_nll.shape == x_start.shape
+        decoder_nll = gd.mean_flat(decoder_nll) / np.log(2.0)
+
+        # At the first timestep return the decoder NLL,
+        # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
+        output = torch.where((t == 0), decoder_nll, kl)
+        return {"output": output, "pred_xstart": out["pred_xstart"]}
+
     def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
         """
         Compute training losses for a single timestep.
@@ -833,8 +1198,8 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
         x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-
         a_t = self.q_sample(x_action, t, noise=action_noised)
+        model_kwargs["a"] = a_t
 
         if (
             self.loss_type == gd.LossType.KL
@@ -854,7 +1219,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             self.loss_type == gd.LossType.MSE
             or self.loss_type == gd.LossType.RESCALED_MSE
         ):
-            model_output = model(x_t, t, **model_kwargs)
+            model_output, act_out = model(x_t, t, **model_kwargs)
 
             if self.model_var_type in [
                 gd.ModelVarType.LEARNED,
@@ -878,7 +1243,11 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                     x_t=x_t[:, mask_frame_num:],
                     t=t,
                     clip_denoised=False,
+                    action=model_kwargs["a"],
+                    # model_kwargs=model_kwargs,
+                    whitout_action=False,
                 )["output"]
+
                 if self.loss_type == gd.LossType.RESCALED_MSE:
                     # Divide by 1000 for equivalence with initial implementation.
                     # Without a factor of 1/1000, the VB term hurts the MSE term.
@@ -893,18 +1262,27 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 gd.ModelMeanType.START_X: x_start[:, mask_frame_num:],
                 gd.ModelMeanType.EPSILON: unmask_noise,
             }[self.model_mean_type]
+
+            target_act = action_noised
+
             assert (
                 model_output[:, mask_frame_num:].shape
                 == target.shape
                 == x_start[:, mask_frame_num:].shape
             )
+            assert act_out.shape == target_act.shape == x_action.shape
             terms["mse"] = gd.mean_flat(
                 (target - model_output[:, mask_frame_num:, :, :, :]) ** 2
             )
+
+            terms["mse_act"] = gd.mean_flat((target_act - act_out) ** 2)
+
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
+                terms["loss_act"] = terms["mse_act"]
             else:
                 terms["loss"] = terms["mse"]
+                terms["loss_act"] = terms["mse_act"]
         else:
             raise NotImplementedError(self.loss_type)
 

@@ -9,14 +9,13 @@ import os
 from collections import OrderedDict
 
 
-class RobotDatasetSeqScene(Dataset):
-    def __init__(self, data_path, transform=None, img_size=120, seq_l=45):
+class RobotDatasetSeqTrj(Dataset):
+    def __init__(self, data_path, transform=None, img_size=64, seq_l=16):
         data_dir = os.path.expanduser(data_path)
         self._file_names = OrderedDict()
         self.data = []
         for file_name in next(os.walk(data_dir))[-1]:
             file_name = os.path.join(data_dir, file_name)
-            print(file_name)
             self.data.extend(
                 np.load(
                     file_name,
@@ -51,7 +50,6 @@ class RobotDatasetSeqScene(Dataset):
 
         # Combine the indices
         selected_indices.extend(remaining_indices.tolist())
-
         selected_indices = sorted(selected_indices)
         # Index the tensor with the selected indices to get the random frames
         random_frames = frames[selected_indices, :, :, :]
@@ -168,14 +166,14 @@ if __name__ == "__main__":
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Resize((120, 120)),  # Resize to (H, W)
-            transforms.CenterCrop(120),
+            transforms.Resize((64, 64)),  # Resize to (H, W)
+            transforms.CenterCrop(64),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ]
     )
 
-    rd_ds = RobotDatasetSeqScene(
-        data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene",
+    rd_ds = RobotDatasetSeqTrj(
+        data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/multiple_robot_goal",
         transform=transform,
     )
 
@@ -194,4 +192,5 @@ if __name__ == "__main__":
             ),
             image_path,
             normalize=True,
+            nrow=16,
         )

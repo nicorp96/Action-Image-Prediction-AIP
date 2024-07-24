@@ -6,11 +6,11 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
-from src.models.difussion_t import DiTActionSeq
+from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj, collate_fn
+from src.models.difussion_t import DiTActionFramesSeq
 from collections import OrderedDict
 from copy import deepcopy
-from src.models.difussion_utils.schedule import create_diffusion_seq
+from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
@@ -21,6 +21,7 @@ from sklearn.manifold import TSNE
 import wandb
 import yaml
 from einops import rearrange
+from src.utils import unnormilize_action_seq__torch
 
 
 @torch.no_grad()
@@ -72,7 +73,7 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-class DiTTrainerScene(TrainerBase):
+class DiTTrainerActFrames(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
@@ -89,7 +90,7 @@ class DiTTrainerScene(TrainerBase):
 
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionSeq(
+        self.model_dit = DiTActionFramesSeq(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -103,14 +104,20 @@ class DiTTrainerScene(TrainerBase):
 
         self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
         self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
+        self.eval_act_save_gen_dir = self.config["trainer"]["action_save_gen"]
+        self.eval_act_save_real_dir = self.config["trainer"]["action_save_real"]
 
         self.ema = deepcopy(self.model_dit).to(
             self.device
         )  # Create an EMA of the model for use after training
         requires_grad(self.ema, False)
-        self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
+        self.model_ddp = DDP(
+            self.model_dit.to(self.device),
+            device_ids=[self.rank],
+            find_unused_parameters=True,
+        )
 
-        self.diffusion_s = create_diffusion_seq(
+        self.diffusion_s = create_diffusion_seq_act(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"]
         )
 
@@ -131,8 +138,8 @@ class DiTTrainerScene(TrainerBase):
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path, transform=transform
+        self.dataset = RobotDatasetSeqTrj(
+            data_path=self.data_path, transform=transform, seq_l=16
         )
         sampler = DistributedSampler(
             self.dataset,
@@ -176,9 +183,7 @@ class DiTTrainerScene(TrainerBase):
             torch.cuda.is_available()
         ), "Training currently requires at least one GPU."
 
-        dist.init_process_group(
-            distributed_config["backend"], world_size=distributed_config["world_size"]
-        )
+        dist.init_process_group(distributed_config["backend"])
         assert (
             self.batch_size % dist.get_world_size() == 0
         ), f"Batch size must be divisible by the world size."
@@ -236,62 +241,36 @@ class DiTTrainerScene(TrainerBase):
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
+                goal_img = (
+                    self.vae.encode(current_img[:1, :, :])
+                    .latent_dist.sample()
+                    .mul_(0.18215)
+                )
 
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
 
-            model_kwargs = dict(a=action, mask_frame_num=2)
+            model_kwargs = dict(a=action, img_c=goal_img, mask_frame_num=2)
             loss_dict = self.diffusion_s.training_losses(
                 self.model_ddp, x, t, model_kwargs
             )
             loss = loss_dict["loss"].mean()
+            loss_act = loss_dict["loss_act"].mean()
             if self.config["trainer"]["wandb_log"]:
                 wandb.log({"loss": loss})
+                wandb.log({"loss_act": loss_act})
+            total_loss = loss + loss_act
             self.optimizer.zero_grad()
-            loss.backward()
+            total_loss.backward()
             self.optimizer.step()
             update_ema(self.ema, self.model_ddp.module)
-            running_loss += loss.item()
+            running_loss += total_loss.item()
 
-            if step % 200 == 0:
-                with torch.no_grad():
-                    model_kwargs = dict(a=action, mask_frame_num=2)
-                    z = torch.randn_like(
-                        x,
-                        device=self.device,
-                    )
-                    samples = self.diffusion_s.p_sample_loop(
-                        self.ema,
-                        z.shape,
-                        z,
-                        clip_denoised=False,
-                        progress=True,
-                        model_kwargs=model_kwargs,
-                        device=self.device,
-                    )
-                    samples = rearrange(
-                        samples, "b f c h w -> (b f) c h w"
-                    ).contiguous()
-                    samples = self.vae.decode(samples / 0.18215).sample
-                    samples = rearrange(
-                        samples, "(b f) c h w -> b f c h w", b=b
-                    ).contiguous()
-                    batchsize = np.random.choice(b)
-                    save_image(
-                        samples[batchsize, :, :, :, :],
-                        self.eval_save_gen_dir + f"_{step}.png",
-                        nrow=5,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
-                    save_image(
-                        next_seq[batchsize, :, :, :, :],
-                        self.eval_save_real_dir + f"_{step}.png",
-                        nrow=5,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
+            if step % 500 == 0:
+                self.save_image_actions(
+                    step=step, x=x, next_seq=next_seq, action=action, goal_img=goal_img
+                )
 
         return running_loss
 
@@ -313,9 +292,65 @@ class DiTTrainerScene(TrainerBase):
     def _save_checkpoint(self):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
 
+    def save_image_actions(self, step, x, next_seq, action, goal_img):
+        b, _, _, _, _ = next_seq.shape
+        with torch.no_grad():
+            action_n = torch.randn_like(
+                action,
+                device=self.device,
+            )
+            model_kwargs = dict(a=action_n, mask_frame_num=2, img_c=goal_img)
+            z = torch.randn_like(
+                x,
+                device=self.device,
+            )
+            samples, actions = self.diffusion_s.p_sample_loop(
+                self.ema,
+                z.shape,
+                z,
+                clip_denoised=False,
+                progress=True,
+                model_kwargs=model_kwargs,
+                device=self.device,
+            )
+            samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
+            samples = self.vae.decode(samples / 0.18215).sample
+            samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
+            batchsize = np.random.choice(b)
+            save_image(
+                samples[batchsize, :, :, :, :],
+                self.eval_save_gen_dir + f"_{step}.png",
+                nrow=4,
+                normalize=True,
+                value_range=(-1, 1),
+            )
+            save_image(
+                next_seq[batchsize, :, :, :, :],
+                self.eval_save_real_dir + f"_{step}.png",
+                nrow=4,
+                normalize=True,
+                value_range=(-1, 1),
+            )
+            np.savetxt(
+                self.eval_act_save_gen_dir + f"_{step}.csv",
+                unnormilize_action_seq__torch(
+                    actions[batchsize, :, :].detach().cpu().numpy(),
+                    [self.dataset.max, self.dataset.min],
+                ),
+                delimiter=",",
+            )
+            np.savetxt(
+                self.eval_act_save_real_dir + f"_{step}.csv",
+                unnormilize_action_seq__torch(
+                    action[batchsize, :, :].detach().cpu().numpy(),
+                    [self.dataset.max, self.dataset.min],
+                ),
+                delimiter=",",
+            )
+
 
 if __name__ == "__main__":
-    trainer = DiTTrainerScene(
+    trainer = DiTTrainerActFrames(
         config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
     )
     # wandb.init(

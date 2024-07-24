@@ -43,7 +43,7 @@ class RobotDatasetSeq(Dataset):
 
         # Combine the indices
         selected_indices.extend(remaining_indices.tolist())
-
+        selected_indices = sorted(selected_indices)
         # Index the tensor with the selected indices to get the random frames
         random_frames = frames[selected_indices, :, :, :]
         random_actions = actions[selected_indices, :]
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     )
 
     rd_ds = RobotDatasetSeq(
-        data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/ur_ds_seq.npy",
+        data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/multiple_robot_goal/ur5_iq_YcbBanana_ds_obj_seq.npy",
         transform=transform,
     )
 
