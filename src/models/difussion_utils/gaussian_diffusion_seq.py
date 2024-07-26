@@ -1128,7 +1128,8 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
         clip_denoised=True,
         model_kwargs=None,
         action=None,
-        whitout_action=True,
+        a_t=None,
+        whitout_action=False,
     ):
         """
         Get a term for the variational lower-bound.
@@ -1141,6 +1142,10 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
         true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
             x_start=x_start, x_t=x_t, t=t
         )
+        true_mean_act, _, true_log_variance_act_clipped = (
+            self.q_posterior_mean_variance(x_start=action, x_t=a_t, t=t)
+        )
+
         out = self.p_mean_variance(
             model,
             x_t,
@@ -1148,23 +1153,46 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             clip_denoised=clip_denoised,
             model_kwargs=model_kwargs,
             act=action,
-            without_action=True,
+            without_action=False,
         )
+
         kl = gd.normal_kl(
             true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
         )
         kl = gd.mean_flat(kl) / np.log(2.0)
 
+        kl_act = gd.normal_kl(
+            true_mean_act,
+            true_log_variance_act_clipped,
+            out["act_mean"],
+            out["act_log_variance"],
+        )
+        kl_act = gd.mean_flat(kl_act) / np.log(2.0)
+
         decoder_nll = -gd.discretized_gaussian_log_likelihood(
             x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
         )
+
+        decoder_nll_act = -gd.discretized_gaussian_log_likelihood(
+            action,
+            means=out["act_mean"],
+            log_scales=0.5 * out["act_log_variance"],
+        )
+
         assert decoder_nll.shape == x_start.shape
         decoder_nll = gd.mean_flat(decoder_nll) / np.log(2.0)
 
+        decoder_nll_act = gd.mean_flat(decoder_nll_act) / np.log(2.0)
         # At the first timestep return the decoder NLL,
         # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
         output = torch.where((t == 0), decoder_nll, kl)
-        return {"output": output, "pred_xstart": out["pred_xstart"]}
+        output_act = torch.where((t == 0), decoder_nll_act, kl_act)
+        return {
+            "output": output,
+            "pred_xstart": out["pred_xstart"],
+            "output_act": output_act,
+            "pred_act": out["pred_act"],
+        }
 
     def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
         """
@@ -1230,28 +1258,35 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 model_output, model_var_values = torch.split(model_output, C, dim=2)
                 # Learn the variance using the variational bound, but don't let
                 # it affect our mean prediction.
-                frozen_out = torch.cat(
-                    [
-                        model_output[:, mask_frame_num:].detach(),
-                        model_var_values[:, mask_frame_num:],
-                    ],
-                    dim=2,
+                frozen_out = (
+                    torch.cat(
+                        [
+                            model_output[:, mask_frame_num:].detach(),
+                            model_var_values[:, mask_frame_num:],
+                        ],
+                        dim=2,
+                    ),
+                    act_out,
                 )
-                terms["vb"] = self._vb_terms_bpd(
+                out_t = self._vb_terms_bpd(
                     model=lambda *args, r=frozen_out: r,
                     x_start=x_start[:, mask_frame_num:],
                     x_t=x_t[:, mask_frame_num:],
                     t=t,
                     clip_denoised=False,
                     action=model_kwargs["a"],
-                    # model_kwargs=model_kwargs,
+                    a_t=a_t,
                     whitout_action=False,
-                )["output"]
+                )
+
+                terms["vb"] = out_t["output"]
+                terms["vb_act"] = out_t["output_act"]
 
                 if self.loss_type == gd.LossType.RESCALED_MSE:
                     # Divide by 1000 for equivalence with initial implementation.
                     # Without a factor of 1/1000, the VB term hurts the MSE term.
                     terms["vb"] *= self.num_timesteps / 1000.0
+                    terms["vb_act"] *= self.num_timesteps / 1000.0
 
             target = {
                 gd.ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
@@ -1279,7 +1314,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
-                terms["loss_act"] = terms["mse_act"]
+                terms["loss_act"] = terms["mse_act"] + terms["vb_act"]
             else:
                 terms["loss"] = terms["mse"]
                 terms["loss_act"] = terms["mse_act"]

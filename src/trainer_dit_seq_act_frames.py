@@ -269,7 +269,11 @@ class DiTTrainerActFrames(TrainerBase):
 
             if step % 500 == 0:
                 self.save_image_actions(
-                    step=step, x=x, next_seq=next_seq, action=action, goal_img=goal_img
+                    step=step,
+                    x=x,
+                    next_seq=next_seq,
+                    actions_real=action,
+                    goal_img=goal_img,
                 )
 
         return running_loss
@@ -292,11 +296,11 @@ class DiTTrainerActFrames(TrainerBase):
     def _save_checkpoint(self):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
 
-    def save_image_actions(self, step, x, next_seq, action, goal_img):
+    def save_image_actions(self, step, x, next_seq, actions_real, goal_img):
         b, _, _, _, _ = next_seq.shape
         with torch.no_grad():
             action_n = torch.randn_like(
-                action,
+                actions_real,
                 device=self.device,
             )
             model_kwargs = dict(a=action_n, mask_frame_num=2, img_c=goal_img)
@@ -304,7 +308,7 @@ class DiTTrainerActFrames(TrainerBase):
                 x,
                 device=self.device,
             )
-            samples, actions = self.diffusion_s.p_sample_loop(
+            samples, actions_pred = self.diffusion_s.p_sample_loop(
                 self.ema,
                 z.shape,
                 z,
@@ -333,20 +337,81 @@ class DiTTrainerActFrames(TrainerBase):
             )
             np.savetxt(
                 self.eval_act_save_gen_dir + f"_{step}.csv",
-                unnormilize_action_seq__torch(
-                    actions[batchsize, :, :].detach().cpu().numpy(),
-                    [self.dataset.max, self.dataset.min],
-                ),
+                # unnormilize_action_seq__torch(
+                #     actions[batchsize, :, :].detach().cpu().numpy(),
+                #     [self.dataset.max, self.dataset.min],
+                # ),
+                actions_pred[batchsize, :, :].detach().cpu().numpy(),
                 delimiter=",",
             )
             np.savetxt(
                 self.eval_act_save_real_dir + f"_{step}.csv",
-                unnormilize_action_seq__torch(
-                    action[batchsize, :, :].detach().cpu().numpy(),
-                    [self.dataset.max, self.dataset.min],
-                ),
+                # unnormilize_action_seq__torch(
+                #     action[batchsize, :, :].detach().cpu().numpy(),
+                #     [self.dataset.max, self.dataset.min],
+                # ),
+                actions_real[batchsize, :, :].detach().cpu().numpy(),
                 delimiter=",",
             )
+            self.log_accuracy(
+                predicted_actions=actions_pred[:batchsize, :, :].detach().cpu().numpy(),
+                real_actions=actions_real[:batchsize, :, :].detach().cpu().numpy(),
+            )
+
+    def calculate_pose_error(self, predicted_pose, real_pose):
+        # Compute the Euclidean distance error for position
+        position_error = np.linalg.norm(
+            np.array(predicted_pose[:3]) - np.array(real_pose[:3])
+        )
+
+        # Compute the error for orientation (roll, pitch, yaw)
+        orientation_error = np.linalg.norm(
+            np.array(predicted_pose[3:6]) - np.array(real_pose[3:6])
+        )
+
+        return position_error, orientation_error
+
+    def calculate_gripper_accuracy(self, predicted_gripper, real_gripper):
+        if predicted_gripper == real_gripper:
+            return 1
+        else:
+            return 0
+
+    def log_accuracy(self, predicted_actions, real_actions):
+        total_position_error = 0
+        total_orientation_error = 0
+        total_gripper_accuracy = 0
+        b_sz, seq_l, dim = predicted_actions.shape
+
+        for i in range(b_sz):
+            for act_i in range(seq_l):
+                predicted_pose = predicted_actions[i, act_i][:6]
+                real_pose = real_actions[i, act_i][:6]
+                predicted_gripper = predicted_actions[i, act_i][6]
+                real_gripper = real_actions[i, act_i][6]
+
+                position_error, orientation_error = self.calculate_pose_error(
+                    predicted_pose, real_pose
+                )
+                gripper_accuracy = self.calculate_gripper_accuracy(
+                    predicted_gripper, real_gripper
+                )
+
+                total_position_error += position_error
+                total_orientation_error += orientation_error
+                total_gripper_accuracy += gripper_accuracy
+
+        mean_position_error = total_position_error  # / b_sz
+        mean_orientation_error = total_orientation_error  # / b_sz
+        # mean_gripper_accuracy = total_gripper_accuracy / b_sz
+        # print(f"\n mean_position_error: {mean_position_error}")
+        # print(f"\n mean_orientation_error: {mean_orientation_error}")
+        # print(f"\n mean_gripper_accuracy: {mean_gripper_accuracy}")
+
+        if self.config["trainer"]["wandb_log"]:
+            wandb.log({"mean_position_error": mean_position_error})
+            wandb.log({"mean_orientation_error": mean_orientation_error})
+            # wandb.log({"mean_gripper_accuracy": mean_gripper_accuracy})
 
 
 if __name__ == "__main__":
