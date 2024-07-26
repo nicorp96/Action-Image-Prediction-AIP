@@ -72,7 +72,7 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-class DiTTrainerScene(TrainerBase):
+class DiTTrainerActScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
@@ -84,7 +84,7 @@ class DiTTrainerScene(TrainerBase):
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
         self.data_path = self.config["trainer"]["data_path"]
-
+        self.cuda_num = self.config["model"]["cuda_num"]
         self.__setup__DDP(self.config["distributed"])
 
         # Model settings
@@ -123,10 +123,10 @@ class DiTTrainerScene(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                # transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
-                transforms.CenterCrop(self.image_size),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                # transforms.CenterCrop(self.image_size),
+                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
@@ -183,7 +183,9 @@ class DiTTrainerScene(TrainerBase):
             self.batch_size % dist.get_world_size() == 0
         ), f"Batch size must be divisible by the world size."
         self.rank = dist.get_rank()
-        self.device = self.rank % torch.cuda.device_count()
+        self.device = torch.device(
+            self.cuda_num
+        )  # self.rank % torch.cuda.device_count()
         self.seed = self.global_seed * dist.get_world_size() + self.rank
         torch.manual_seed(self.seed)
         torch.cuda.set_device(self.device)
@@ -315,7 +317,7 @@ class DiTTrainerScene(TrainerBase):
 
 
 if __name__ == "__main__":
-    trainer = DiTTrainerScene(
+    trainer = DiTTrainerActScene(
         config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
     )
     # wandb.init(

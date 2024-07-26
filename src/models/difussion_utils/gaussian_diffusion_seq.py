@@ -874,21 +874,6 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             model_log_variance = frac * max_log + (1 - frac) * min_log
             model_variance = torch.exp(model_log_variance)
 
-            act_variance, act_log_variance = {
-                # for fixedlarge, we set the initial (log-)variance like so
-                # to get a better decoder log likelihood.
-                gd.ModelVarType.FIXED_LARGE: (
-                    np.append(self.posterior_variance[1], self.betas[1:]),
-                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
-                ),
-                gd.ModelVarType.FIXED_SMALL: (
-                    self.posterior_variance,
-                    self.posterior_log_variance_clipped,
-                ),
-            }[gd.ModelVarType.FIXED_LARGE]
-            act_variance = _extract_into_tensor(act_variance, t, action.shape)
-            act_log_variance = _extract_into_tensor(act_log_variance, t, action.shape)
-
         else:
             model_variance, model_log_variance = {
                 # for fixedlarge, we set the initial (log-)variance like so
@@ -904,6 +889,21 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             }[self.model_var_type]
             model_variance = _extract_into_tensor(model_variance, t, x.shape)
             model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+
+        act_variance, act_log_variance = {
+            # for fixedlarge, we set the initial (log-)variance like so
+            # to get a better decoder log likelihood.
+            gd.ModelVarType.FIXED_LARGE: (
+                np.append(self.posterior_variance[1], self.betas[1:]),
+                np.log(np.append(self.posterior_variance[1], self.betas[1:])),
+            ),
+            gd.ModelVarType.FIXED_SMALL: (
+                self.posterior_variance,
+                self.posterior_log_variance_clipped,
+            ),
+        }[gd.ModelVarType.FIXED_LARGE]
+        act_variance = _extract_into_tensor(act_variance, t, action.shape)
+        act_log_variance = _extract_into_tensor(act_log_variance, t, action.shape)
 
         def process_xstart(x):
             if denoised_fn is not None:
@@ -1299,7 +1299,6 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             }[self.model_mean_type]
 
             target_act = action_noised
-
             assert (
                 model_output[:, mask_frame_num:].shape
                 == target.shape

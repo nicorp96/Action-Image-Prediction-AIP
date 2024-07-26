@@ -1,14 +1,14 @@
 trainer:
   batch_size: 32
   global_seed: 0
-  image_size: 128
+  image_size: 64
   n_epochs: 2000
   data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene"
   eval_save_real: "results/diffusion_seq_scene/real/epoch"
   eval_save_gen: "results/diffusion_seq_scene/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
-  cuda_num: 1
+  cuda_num: 0
   wandb_log: false
 
 model:
@@ -21,7 +21,8 @@ model:
   num_heads: 6
   mlp_ratio: 4.0
   action_dim: 7
-  learn_sigma: true
+  learn_sigma: false
+  seq_len: 16
 
 diffusion:
   timestep_respacing: ""
