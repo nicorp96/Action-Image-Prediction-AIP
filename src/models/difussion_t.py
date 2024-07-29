@@ -652,6 +652,16 @@ class DiTActionFramesSeq(DiTActionSeqAct):
         self.pos_embed_act = nn.Parameter(
             torch.zeros(1, 16, hidden_size), requires_grad=False
         )
+
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_length, hidden_size), requires_grad=False
+        )
+
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+
         pos_embed_act = get_2d_sincos_pos_embed(
             self.pos_embed_act.shape[-1], int(self.seq_length**0.5)
         )
@@ -684,26 +694,54 @@ class DiTActionFramesSeq(DiTActionSeqAct):
         a = rearrange(a, "b f d -> (b f) d")
         a = repeat(a, "b d -> b c d", c=1)
         x = torch.cat((x, a), dim=1)
+
+        # timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        # y_feat = img_c.flatten(start_dim=1)
+        # y_emb = self.img_c_embedder(y_feat)
+        # c = timestep_spatial + y_emb
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 1))
         y_feat = img_c.flatten(start_dim=1)
         y_emb = self.img_c_embedder(y_feat)
-        c = timestep_spatial + y_emb
-        for block in self.blocks:
-            x_b = block(x, c)  # (N, T, D)
 
-        x = self.final_layer(
-            x_b[:, :-1, :], c
-        )  # (N, T, patch_size ** 2 * out_channels)
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + y_emb
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        x_b = x
+        # for block in self.blocks:
+        #     x_b = block(x, c)  # (N, T, D)
+        #      x_b[:, :-1, :], c
+        # )  # (N, T, patch_size ** 2 * out_channels)
+        # x_act = self.final_layer_act(x_b[:, 15:16, :], c)
+        # x_act = torch.einsum("nhw->nhw", x_act)
+        # x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
+        # x_act = self.downsample_layer(x_act)
+        # x = self.unpatchify(x)  # (N, out_channels, H, W)
+        # x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        # x = self.final_layer(
+        #     x_b[:, :-1, :], c
+        # )  # (N, T, patch_size ** 2 * out_channels)
+        c = timestep_spatial + y_emb
         x_act = self.final_layer_act(x_b[:, 15:16, :], c)
         x_act = torch.einsum("nhw->nhw", x_act)
         x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
         x_act = self.downsample_layer(x_act)
+        x = self.final_layer(x_b[:, :-1, :], c)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
         return x, x_act
 
 
 class DiTActionSeqISim(DiTActionSeq):
+    # https://github.com/bytedance/IRASim/blob/main/models/irasim.py
     def __init__(
         self,
         input_size=16,

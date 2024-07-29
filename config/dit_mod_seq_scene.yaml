@@ -1,11 +1,11 @@
 trainer:
-  batch_size: 32
+  batch_size: 64
   global_seed: 0
   image_size: 64
-  n_epochs: 2000
+  n_epochs: 4050
   data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene"
-  eval_save_real: "results/diffusion_seq_scene/real/epoch"
-  eval_save_gen: "results/diffusion_seq_scene/gen/epoch"
+  eval_save_real: "results/diffusion_seq_scene/without_xarm/real/epoch"
+  eval_save_gen: "results/diffusion_seq_scene/without_xarm/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0

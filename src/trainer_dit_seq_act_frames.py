@@ -100,6 +100,7 @@ class DiTTrainerActFrames(TrainerBase):
             mlp_ratio=model_config["mlp_ratio"],
             action_dim=model_config["action_dim"],
             learn_sigma=model_config["learn_sigma"],
+            seq_l=model_config["seq_len"],
         )
         self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
         self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
@@ -139,7 +140,7 @@ class DiTTrainerActFrames(TrainerBase):
 
         # Load dataset
         self.dataset = RobotDatasetSeqTrj(
-            data_path=self.data_path, transform=transform, seq_l=16
+            data_path=self.data_path, transform=transform, seq_l=model_config["seq_len"]
         )
         sampler = DistributedSampler(
             self.dataset,

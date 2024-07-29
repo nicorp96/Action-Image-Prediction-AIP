@@ -84,7 +84,7 @@ class DiTTrainerActScene(TrainerBase):
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
         self.data_path = self.config["trainer"]["data_path"]
-        self.cuda_num = self.config["model"]["cuda_num"]
+        self.cuda_num = self.config["trainer"]["cuda_num"]
         self.__setup__DDP(self.config["distributed"])
 
         # Model settings
@@ -111,7 +111,8 @@ class DiTTrainerActScene(TrainerBase):
         self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
 
         self.diffusion_s = create_diffusion_seq(
-            timestep_respacing=self.config["diffusion"]["timestep_respacing"]
+            timestep_respacing=self.config["diffusion"]["timestep_respacing"],
+            learn_sigma=model_config["learn_sigma"],
         )
 
         # Load VAE
@@ -132,7 +133,9 @@ class DiTTrainerActScene(TrainerBase):
 
         # Load dataset
         self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path, transform=transform
+            data_path=self.data_path,
+            transform=transform,
+            seq_l=model_config["seq_len"],
         )
         sampler = DistributedSampler(
             self.dataset,

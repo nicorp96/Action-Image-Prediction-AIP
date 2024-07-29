@@ -26,7 +26,7 @@ def main():
     try:
         config = "config/dit_mod_seq_scene.yaml"
 
-        trainer_name = "DiTTrainerScene"
+        trainer_name = "DiTTrainerActScene"
         base_dir = os.getcwd()
 
         # Default configuration for demonstration
