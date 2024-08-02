@@ -7,7 +7,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj, collate_fn
-from src.models.difussion_t import DiTActionFramesSeq
+from src.models.difussion_t import (
+    DiTActionFramesSeq,
+    DiTActionFramesSeq2,
+    DiTActionFramesSeq3,
+)
 from collections import OrderedDict
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq_act
@@ -90,7 +94,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionFramesSeq(
+        self.model_dit = DiTActionFramesSeq2(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -300,11 +304,13 @@ class DiTTrainerActFrames(TrainerBase):
     def save_image_actions(self, step, x, next_seq, actions_real, goal_img):
         b, _, _, _, _ = next_seq.shape
         with torch.no_grad():
-            action_n = torch.randn_like(
-                actions_real,
-                device=self.device,
+            # action_n = torch.randn_like(
+            #     actions_real,
+            #     device=self.device,
+            # )
+            model_kwargs = dict(
+                a=actions_real[:, :2, :], mask_frame_num=2, img_c=goal_img
             )
-            model_kwargs = dict(a=action_n, mask_frame_num=2, img_c=goal_img)
             z = torch.randn_like(
                 x,
                 device=self.device,

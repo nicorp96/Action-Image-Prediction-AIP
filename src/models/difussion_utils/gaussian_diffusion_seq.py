@@ -847,10 +847,8 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
         """
         if model_kwargs is None:
             model_kwargs = {}
-
         B, F, C = x.shape[:3]
         action = act if act is not None else None
-
         assert t.shape == (B,)
         model_output = model(x, t, **model_kwargs)
         if isinstance(model_output, tuple):
@@ -890,20 +888,22 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             model_variance = _extract_into_tensor(model_variance, t, x.shape)
             model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
 
-        act_variance, act_log_variance = {
-            # for fixedlarge, we set the initial (log-)variance like so
-            # to get a better decoder log likelihood.
-            gd.ModelVarType.FIXED_LARGE: (
-                np.append(self.posterior_variance[1], self.betas[1:]),
-                np.log(np.append(self.posterior_variance[1], self.betas[1:])),
-            ),
-            gd.ModelVarType.FIXED_SMALL: (
-                self.posterior_variance,
-                self.posterior_log_variance_clipped,
-            ),
-        }[gd.ModelVarType.FIXED_LARGE]
-        act_variance = _extract_into_tensor(act_variance, t, action.shape)
-        act_log_variance = _extract_into_tensor(act_log_variance, t, action.shape)
+        # act_variance, act_log_variance = {
+        #     # for fixedlarge, we set the initial (log-)variance like so
+        #     # to get a better decoder log likelihood.
+        #     gd.ModelVarType.FIXED_LARGE: (
+        #         np.append(self.posterior_variance[1], self.betas[1:]),
+        #         np.log(np.append(self.posterior_variance[1], self.betas[1:])),
+        #     ),
+        #     gd.ModelVarType.FIXED_SMALL: (
+        #         self.posterior_variance,
+        #         self.posterior_log_variance_clipped,
+        #     ),
+        # }[gd.ModelVarType.FIXED_LARGE]
+        act_variance = None  # _extract_into_tensor(act_variance, t, action.shape)
+        act_log_variance = (
+            None  # _extract_into_tensor(act_log_variance, t, action.shape)
+        )
 
         def process_xstart(x):
             if denoised_fn is not None:
@@ -919,11 +919,11 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
             )
             pred_act = (
-                None
-                if without_action
-                else process_xstart(
-                    self._predict_xstart_from_eps(x_t=action, t=t, eps=act_out)
-                )
+                act_out
+                # if without_action
+                # else process_xstart(
+                #     self._predict_xstart_from_eps(x_t=action, t=t, eps=act_out)
+                # )
             )
         model_mean, _, _ = self.q_posterior_mean_variance(
             x_start=pred_xstart, x_t=x, t=t
@@ -931,20 +931,23 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         act_mean, _, _ = (
             (None, None, None)
-            if without_action
-            else self.q_posterior_mean_variance(x_start=pred_act, x_t=action, t=t)
+            # if without_action
+            # else self.q_posterior_mean_variance(x_start=pred_act, x_t=action, t=t)
         )
 
         assert (
             model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         )
-        if not without_action:
-            assert (
-                act_mean.shape
-                == act_log_variance.shape
-                == pred_act.shape
-                == action.shape
-            )
+        # print(pred_act.shape)
+        # print(action.shape)
+        # if not without_action:
+        #     assert (
+        #         # act_mean.shape
+        #         # == act_log_variance.shape
+        #         # ==
+        #         pred_act.shape
+        #         == action.shape
+        #     )
         return {
             "mean": model_mean,
             "variance": model_variance,
@@ -1000,7 +1003,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             progress=progress,
         ):
             final = sample
-        return final["sample"], final["sample_act"]
+        return final["sample"], final["pred_act"]
 
     def p_sample(
         self,
@@ -1050,21 +1053,21 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             out["mean"] = self.condition_mean(
                 cond_fn, out, x, t, model_kwargs=model_kwargs
             )
-            out["act_mean"] = self.condition_mean_act(
-                cond_fn, out, x, t, model_kwargs=model_kwargs
-            )
+            # out["act_mean"] = self.condition_mean_act(
+            #     cond_fn, out, x, t, model_kwargs=model_kwargs
+            # )
         sample = (
             out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         )
 
-        sample_act = (
-            out["act_mean"]
-            + nonzero_mask_act * torch.exp(0.5 * out["act_log_variance"]) * noise_act
-        )
+        # sample_act = (
+        #     out["act_mean"]
+        #     + nonzero_mask_act * torch.exp(0.5 * out["act_log_variance"]) * noise_act
+        # )
         return {
             "sample": sample,
             "pred_xstart": out["pred_xstart"],
-            "sample_act": sample_act,
+            "sample_act": None,  # sample_act,
             "pred_act": out["pred_act"],
         }
 
@@ -1117,7 +1120,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 )
                 yield out
                 img = out["sample"]
-                model_kwargs["a"] = out["sample_act"]
+                #model_kwargs["a"] = out["pred"]
 
     def _vb_terms_bpd(
         self,
@@ -1226,7 +1229,9 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
         x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-        a_t = self.q_sample(x_action, t, noise=action_noised)
+        a_t = x_action[
+            :, :mask_frame_num, :
+        ]  # self.q_sample(x_action, t, noise=action_noised)
         model_kwargs["a"] = a_t
 
         if (
@@ -1298,13 +1303,13 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 gd.ModelMeanType.EPSILON: unmask_noise,
             }[self.model_mean_type]
 
-            target_act = action_noised
+            target_act = x_action
             assert (
                 model_output[:, mask_frame_num:].shape
                 == target.shape
                 == x_start[:, mask_frame_num:].shape
             )
-            assert act_out.shape == target_act.shape == x_action.shape
+            assert act_out.shape == target_act.shape  # == x_action.shape
             terms["mse"] = gd.mean_flat(
                 (target - model_output[:, mask_frame_num:, :, :, :]) ** 2
             )

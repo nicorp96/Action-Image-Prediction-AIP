@@ -24,9 +24,9 @@ def get_trainer(trainer_type, config):
 
 def main():
     try:
-        config = "config/dit_mod_seq_scene.yaml"
+        config = "config/dit_mod_seq_act_frames.yaml"
 
-        trainer_name = "DiTTrainerActScene"
+        trainer_name = "DiTTrainerActFrames"
         base_dir = os.getcwd()
 
         # Default configuration for demonstration

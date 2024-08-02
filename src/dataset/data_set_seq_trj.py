@@ -156,7 +156,7 @@ def collate_fn(batch):
         padded_next_images.append(padded_seq)
 
     padded_next_images = torch.stack(padded_next_images)
-    current_images = torch.stack(current_images)
+    current_images = torch.stack(current_images, dim=0)
     actions = torch.stack(actions)
 
     return current_images, padded_next_images, actions
