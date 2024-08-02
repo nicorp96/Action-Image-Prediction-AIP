@@ -94,7 +94,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionFramesSeq2(
+        self.model_dit = DiTActionFramesSeq3(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -118,7 +118,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.model_ddp = DDP(
             self.model_dit.to(self.device),
             device_ids=[self.rank],
-            find_unused_parameters=True,
+            # find_unused_parameters=True,
         )
 
         self.diffusion_s = create_diffusion_seq_act(
