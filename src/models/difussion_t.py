@@ -4,8 +4,7 @@ import numpy as np
 from timm.models.vision_transformer import PatchEmbed, Mlp
 import math
 from einops import rearrange, repeat
-from .difussion_utils.transformers_utils import Attention
-from diffusers.models.attention import JointTransformerBlock
+from .difussion_utils.transformers_utils import Attention, DiTBlockJoint
 
 
 def modulate(x, shift, scale):
@@ -1092,11 +1091,8 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
         )
 
         # Replace DiTBlock with JointTransformerBlock
-        self.last_block = JointTransformerBlock(
-            dim=hidden_size,
-            num_attention_heads=num_heads,
-            attention_head_dim=hidden_size // num_heads,
-            context_pre_only=False,
+        self.first_block = DiTBlockJoint(
+            hidden_size, num_heads, mlp_ratio=mlp_ratio, attention_mode="math"
         )
 
         temp_embed = get_1d_sincos_temp_embed(
@@ -1113,6 +1109,9 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
         self.img_c_embedder = nn.Linear(256, hidden_size)
         self.final_layer_act = FinalLayer(hidden_size, self.seq_length + 1, action_dim)
         self.downsample_layer = nn.Linear(847, 7)
+
+        nn.init.constant_(self.first_block.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.first_block.adaLN_modulation[-1].bias, 0)
 
         nn.init.normal_(self.a_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.a_embedder.mlp[2].weight, std=0.02)
@@ -1139,13 +1138,15 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
         a = rearrange(a, "b f d -> (b f) d")
         a = rearrange(a, "b (c h) -> (b c) h", c=5)
         a = repeat(a, "b d -> b c d", c=1)
-        x = torch.cat((x, a), dim=1)
+        # x = torch.cat((x, a), dim=1)
         # x = x + a
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
         timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 1))
 
         y_feat = img_c.flatten(start_dim=1)
         y_emb = self.img_c_embedder(y_feat)
+        c = timestep_spatial + y_emb
+        x = self.first_block(x, a, c)
 
         for i in range(0, len(self.blocks), 2):
             c = timestep_spatial + y_emb
@@ -1160,8 +1161,7 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
             x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
 
         c = timestep_spatial + y_emb
-        # Use JointTransformerBlock instead of DiTBlock
-        _, x = self.last_block(x, c, t)
+
         x_act = self.final_layer_act(x[:, 15:16, :], c)
         x_act = torch.einsum("nhw->nhw", x_act)
         x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])

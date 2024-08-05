@@ -2,6 +2,7 @@ import torch.nn as nn
 from torch import einsum
 import torch
 import torch.nn.functional as F
+from timm.models.vision_transformer import PatchEmbed, Mlp
 
 try:
     from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
@@ -20,6 +21,10 @@ def split_at_index(dim, index, t):
     l = (*pre_slices, slice(None, index))
     r = (*pre_slices, slice(index, None))
     return t[l], t[r]
+
+
+def modulate(x, shift, scale):
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
 class Attention(nn.Module):
@@ -161,3 +166,59 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+
+class DiTBlockJoint(nn.Module):
+    """
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        attention_mode="math",
+        **block_kwargs,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = Attention(
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            attention_mode=attention_mode,
+            **block_kwargs,
+        )
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=approx_gelu,
+            drop=0,
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, a, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.adaLN_modulation(c).chunk(6, dim=1)
+        )
+        x = x + gate_msa.unsqueeze(1) * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa)
+        )
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+
+        a = a + gate_msa.unsqueeze(1) * self.attn(
+            modulate(self.norm1(a), shift_msa, scale_msa)
+        )
+        a = a + gate_mlp.unsqueeze(1) * self.mlp(
+            modulate(self.norm2(a), shift_mlp, scale_mlp)
+        )
+        out = torch.cat((x, a), dim=1)
+        return out

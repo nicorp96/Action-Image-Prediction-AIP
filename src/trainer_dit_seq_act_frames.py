@@ -11,6 +11,7 @@ from src.models.difussion_t import (
     DiTActionFramesSeq,
     DiTActionFramesSeq2,
     DiTActionFramesSeq3,
+    DiTActionFramesSeq4,
 )
 from collections import OrderedDict
 from copy import deepcopy
@@ -94,7 +95,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionFramesSeq3(
+        self.model_dit = DiTActionFramesSeq4(
             input_size=model_config["input_size"],
             patch_size=model_config["patch_size"],
             in_channels=model_config["in_channels"],
@@ -135,7 +136,7 @@ class DiTTrainerActFrames(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.RandomHorizontalFlip(),
+                # transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
                 transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),

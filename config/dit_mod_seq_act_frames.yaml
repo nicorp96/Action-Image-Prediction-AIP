@@ -4,14 +4,14 @@ trainer:
   image_size: 64
   n_epochs: 15002
   data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/multiple_robot_goal"
-  eval_save_real: "results/diffusion_seq_frame_act/spa_temp_arch/real/epoch"
-  eval_save_gen: "results/diffusion_seq_frame_act/spa_temp_arch/gen/epoch"
-  action_save_gen: "results/diffusion_seq_frame_act/spa_temp_arch/gen/action/epoch"
-  action_save_real: "results/diffusion_seq_frame_act/spa_temp_arch/real/action/epoch"
+  eval_save_real: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/real/epoch"
+  eval_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/gen/epoch"
+  action_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/gen/action/epoch"
+  action_save_real: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/real/action/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
-  wandb_log: false
+  wandb_log: true
 
 model:
   type: "DiT"
