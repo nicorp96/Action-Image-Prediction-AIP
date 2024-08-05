@@ -5,6 +5,7 @@ from src.trainer_dit_seq_act import DiTTrainerActScene
 from src.trainer_dit_seq_act_frames import DiTTrainerActFrames
 from src.trainer_dit_seq_scene import DiTTrainerScene
 import os
+import argparse
 
 
 def get_trainer(trainer_type, config):
@@ -24,16 +25,37 @@ def get_trainer(trainer_type, config):
 
 def main():
     try:
-        config = "config/dit_mod_seq_act_frames.yaml"
 
-        trainer_name = "DiTTrainerActFrames"
         base_dir = os.getcwd()
 
+        parser = argparse.ArgumentParser(description="Simulation Enviroment UR5")
+        parser.add_argument(
+            "-c", "--config", help="name of config file", default="dit_mod_seq.yaml"
+        )
+        parser.add_argument(
+            "-t",
+            "--trainer",
+            help="Trainer",
+            default="DiTTrainerActScene",
+            choices=[
+                "DiTTrainer",
+                "DiTTrainerMod",
+                "DiTTrainerV",
+                "DiTTrainerActScene",
+                "DiTTrainerActFrames",
+            ],
+        )
+
+        parser.add_argument("--local-rank")
+        args = parser.parse_args()
+        trainer_name = args.trainer
+        config = f"{args.config}"
+
+        base_dir = os.getcwd()
         # Default configuration for demonstration
         config_dir = os.path.join(base_dir, config)
 
         trainer = get_trainer(trainer_name, config_dir)
-
         trainer.train()
 
     except ValueError as exc:

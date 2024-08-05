@@ -3,7 +3,7 @@ trainer:
   global_seed: 0
   image_size: 64
   n_epochs: 15002
-  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/multiple_robot_goal"
+  data_path: "data/multiple_robot_goal"
   eval_save_real: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/real/epoch"
   eval_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/gen/epoch"
   action_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq4/gen/action/epoch"

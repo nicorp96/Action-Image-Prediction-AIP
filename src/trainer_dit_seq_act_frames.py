@@ -27,6 +27,7 @@ import wandb
 import yaml
 from einops import rearrange
 from src.utils import unnormilize_action_seq__torch
+import os
 
 
 @torch.no_grad()
@@ -85,11 +86,12 @@ class DiTTrainerActFrames(TrainerBase):
         if self.config["trainer"]["wandb_log"]:
             wandb.init()
         # Trainer settings
+        base = os.getcwd()
         self.batch_size = self.config["trainer"]["batch_size"]
         self.global_seed = self.config["trainer"]["global_seed"]
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
-        self.data_path = self.config["trainer"]["data_path"]
+        self.data_path = os.path.join(base, self.config["trainer"]["data_path"])
         self.cuda_num = self.config["trainer"]["cuda_num"]
 
         self.__setup__DDP(self.config["distributed"])
@@ -107,10 +109,18 @@ class DiTTrainerActFrames(TrainerBase):
             learn_sigma=model_config["learn_sigma"],
             seq_l=model_config["seq_len"],
         )
-        self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
-        self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
-        self.eval_act_save_gen_dir = self.config["trainer"]["action_save_gen"]
-        self.eval_act_save_real_dir = self.config["trainer"]["action_save_real"]
+        self.eval_save_real_dir = os.path.join(
+            base, self.config["trainer"]["eval_save_real"]
+        )
+        self.eval_save_gen_dir = os.path.join(
+            base, self.config["trainer"]["eval_save_gen"]
+        )
+        self.eval_act_save_gen_dir = os.path.join(
+            base, self.config["trainer"]["action_save_gen"]
+        )
+        self.eval_act_save_real_dir = os.path.join(
+            base, self.config["trainer"]["action_save_real"]
+        )
 
         self.ema = deepcopy(self.model_dit).to(
             self.device

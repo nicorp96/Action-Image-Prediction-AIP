@@ -20,6 +20,7 @@ from sklearn.manifold import TSNE
 import wandb
 import yaml
 from einops import rearrange
+import os
 
 
 @torch.no_grad()
@@ -78,14 +79,14 @@ class DiTTrainerScene(TrainerBase):
         if self.config["trainer"]["wandb_log"]:
             wandb.init()
         # Trainer settings
+        base = os.getcwd()
         self.batch_size = self.config["trainer"]["batch_size"]
         self.global_seed = self.config["trainer"]["global_seed"]
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
-        self.data_path = self.config["trainer"]["data_path"]
+        self.data_path = os.path.join(base, self.config["trainer"]["data_path"])
         self.cuda_num = self.config["trainer"]["cuda_num"]
         self.__setup__DDP(self.config["distributed"])
-
         # Model settings
         model_config = self.config["model"]
         self.model_dit = DiTActionSeqISim(
@@ -101,8 +102,12 @@ class DiTTrainerScene(TrainerBase):
             seq_len=model_config["seq_len"],
         )
 
-        self.eval_save_real_dir = self.config["trainer"]["eval_save_real"]
-        self.eval_save_gen_dir = self.config["trainer"]["eval_save_gen"]
+        self.eval_save_real_dir = os.path.join(
+            base, self.config["trainer"]["eval_save_real"]
+        )
+        self.eval_save_gen_dir = os.path.join(
+            base, self.config["trainer"]["eval_save_gen"]
+        )
 
         self.ema = deepcopy(self.model_dit).to(
             self.device
