@@ -15,7 +15,7 @@ from src.models.difussion_t import (
 )
 from collections import OrderedDict
 from copy import deepcopy
-from src.models.difussion_utils.schedule import create_diffusion_seq_act
+from src.models.difussion_utils.schedule import create_diffusion_seq_act_att
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
@@ -26,7 +26,6 @@ from sklearn.manifold import TSNE
 import wandb
 import yaml
 from einops import rearrange
-from src.utils import unnormilize_action_seq__torch
 from diffusers.optimization import get_scheduler
 from src.metrics.video_metrics import VideoMetrics
 import os
@@ -53,7 +52,7 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-class DiTTrainerActFrames(TrainerBase):
+class DiTTrainerActFramesAtt(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
@@ -106,7 +105,7 @@ class DiTTrainerActFrames(TrainerBase):
             # find_unused_parameters=True,
         )
 
-        self.diffusion_s = create_diffusion_seq_act(
+        self.diffusion_s = create_diffusion_seq_act_att(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"],
             learn_sigma=self.config["model"]["learn_sigma"],
         )
@@ -388,9 +387,8 @@ class DiTTrainerActFrames(TrainerBase):
             avg_psnr, avg_ssim = self.metrics.evaluate_video(
                 samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
             )
-            if self.config["trainer"]["wandb_log"]:
-                wandb.log({"psnr": avg_psnr})
-                wandb.log({"ssim": avg_ssim})
+            print(f"avg_psnr = {avg_psnr}")
+            print(f"avg_ssim = {avg_ssim}")
 
     def calculate_pose_error(self, predicted_pose, real_pose):
         # Compute the Euclidean distance error for position
@@ -449,7 +447,7 @@ class DiTTrainerActFrames(TrainerBase):
 
 
 if __name__ == "__main__":
-    trainer = DiTTrainerActFrames(
+    trainer = DiTTrainerActFramesAtt(
         config_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/config/dit.yaml"
     )
     # wandb.init(

@@ -36,34 +36,6 @@ def update_ema(ema_model, model, decay=0.9999):
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
 
 
-@torch.no_grad()
-def visualize_latent_space(data_loader, vae, device):
-    vae.eval()
-    latent_vectors = []
-    labels = []
-
-    for current_img, _, _ in data_loader:
-        current_img = current_img.to(device, dtype=torch.float32)
-        latents = vae.encode(current_img).latent_dist.sample().mul_(0.18215)
-        latent_vectors.extend(latents.cpu().numpy())
-        # Assuming labels or some form of identifier is available
-        labels.extend(current_img.cpu().numpy())
-
-    latent_vectors = np.array(latent_vectors)
-    labels = np.array(labels)
-
-    tsne = TSNE(n_components=2, random_state=0)
-    tsne_results = tsne.fit_transform(latent_vectors)
-
-    plt.figure(figsize=(10, 5))
-    plt.scatter(tsne_results[:, 0], tsne_results[:, 1], c=labels, cmap="viridis")
-    plt.colorbar()
-    plt.title("t-SNE Visualization of VAE Latent Space")
-    plt.xlabel("Dimension 1")
-    plt.ylabel("Dimension 2")
-    plt.show()
-
-
 def requires_grad(model, flag=True):
     """
     Set requires_grad flag for all parameters in a model.
@@ -271,6 +243,7 @@ class DiTTrainerScene(TrainerBase):
                         x,
                         device=self.device,
                     )
+                    z[:, :2, :, :] = x[:, :2, :, :]
                     samples = self.diffusion_s.p_sample_loop(
                         self.ema,
                         z.shape,
@@ -333,4 +306,3 @@ if __name__ == "__main__":
     #     # entity=trainer.config["wandb"]["entity"],
     # )
     trainer.train()
-    # visualize_latent_space(trainer.data_loader, trainer.vae, trainer.device)
