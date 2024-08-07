@@ -2,8 +2,8 @@ trainer:
   batch_size: 64
   global_seed: 0
   image_size: 64
-  n_epochs: 4050
-  data_path: "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene"
+  n_epochs: 20005
+  data_path: "data/dynamic_scene"
   eval_save_real: "results/diffusion_seq_scene/without_xarm/real/epoch"
   eval_save_gen: "results/diffusion_seq_scene/without_xarm/gen/epoch"
   learning_rate: 0.0001
@@ -16,8 +16,8 @@ model:
   input_size: 8
   patch_size: 2
   in_channels: 4
-  hidden_size: 384
-  depth: 4
+  hidden_size: 768
+  depth: 6
   num_heads: 6
   mlp_ratio: 4.0
   action_dim: 7

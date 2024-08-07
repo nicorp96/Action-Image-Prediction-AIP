@@ -1172,6 +1172,114 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
         return x, x_act
 
 
+class ConditionEmbedding(nn.Module):
+
+    def __init__(self, out_dim=1200):
+        super(ConditionEmbedding, self).__init__()
+
+        # Define the convolutional layers
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=4, stride=2)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
+        self.conv4 = nn.Conv2d(
+            in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
+        )
+
+        # ReLU activation
+        self.relu = nn.ReLU()
+
+        # Initialize weights with Gaussian distribution
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.normal_(m.weight, mean=0, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = self.relu(self.conv4(x))
+        return x
+
+
+class DiTActionSeqISimMultiCondi(DiTActionSeq):
+    # https://arxiv.org/pdf/2302.05543
+    def __init__(
+        self,
+        input_size=16,
+        patch_size=4,
+        in_channels=4,
+        hidden_size=1152,
+        depth=28,
+        num_heads=16,
+        mlp_ratio=4,
+        action_dim=6,
+        learn_sigma=True,
+        seq_len=45,
+    ):
+        super().__init__(
+            input_size,
+            patch_size,
+            in_channels,
+            hidden_size,
+            depth,
+            num_heads,
+            mlp_ratio,
+            action_dim,
+            learn_sigma,
+        )
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, seq_len, hidden_size), requires_grad=False
+        )
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        self.condition_emb = ConditionEmbedding(out_dim=96)
+
+    def forward(self, x, t, a, c_m, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = rearrange(a, "b f d -> (b f) d")
+        a = self.a_embedder(a)  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        c_m = rearrange(c_m, "b l c w h-> (b l) c w h")
+        canny_emb = self.condition_emb(c_m)
+        canny_emb = rearrange(canny_emb, "b c w h -> b (c w h)")
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
+
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + a + canny_emb
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        c = timestep_spatial + a
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x
+
+
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
 #################################################################################

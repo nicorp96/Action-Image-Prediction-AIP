@@ -1,0 +1,42 @@
+trainer:
+  batch_size: 32
+  global_seed: 0
+  image_size: 64
+  n_epochs: 15002
+  data_path: "data/multiple_robot_goal"
+  eval_save_real: "results/diffusion_seq_frame_act_att/DiTActionFramesSeq4/real/epoch"
+  eval_save_gen: "results/diffusion_seq_frame_act_att/DiTActionFramesSeq4/gen/epoch"
+  action_save_gen: "results/diffusion_seq_frame_act_att/DiTActionFramesSeq4/gen/action/epoch"
+  action_save_real: "results/diffusion_seq_frame_act_att/DiTActionFramesSeq4/real/action/epoch"
+  learning_rate: 0.0001
+  weight_decay: 0
+  cuda_num: 0
+  wandb_log: true
+
+model:
+  type: "DiT"
+  input_size: 8
+  patch_size: 2
+  in_channels: 4
+  hidden_size: 384
+  depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  action_dim: 7
+  learn_sigma: false
+  seq_len: 10
+
+diffusion:
+  timestep_respacing: ""
+
+vae:
+  path: "stabilityai/stable-diffusion-xl-refiner-1.0"
+  subfolder: "vae"
+
+distributed:
+  backend: "nccl"
+  world_size: 1  # Adjust according to the number of GPUs
+
+wandb:
+  project: "DiT Robot Image Prediction"
+  entity: "nicorp96"

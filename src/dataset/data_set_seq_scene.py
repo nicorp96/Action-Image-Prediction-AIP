@@ -7,6 +7,75 @@ import torchvision.utils as vutils
 import torch.nn.functional as F
 import os
 from collections import OrderedDict
+import cv2
+import einops
+import matplotlib.pyplot as plt
+
+
+def HWC3(x):
+    assert x.dtype == np.uint8
+    if x.ndim == 2:
+        x = x[:, :, None]
+    assert x.ndim == 3
+    H, W, C = x.shape
+    assert C == 1 or C == 3 or C == 4
+    if C == 3:
+        return x
+    if C == 1:
+        return np.concatenate([x, x, x], axis=2)
+    if C == 4:
+        color = x[:, :, 0:3].astype(np.float32)
+        alpha = x[:, :, 3:4].astype(np.float32) / 255.0
+        y = color * alpha + 255.0 * (1.0 - alpha)
+        y = y.clip(0, 255).astype(np.uint8)
+        return y
+
+
+def resize_image(input_image, resolution):
+    H, W, C = input_image.shape
+    H = float(H)
+    W = float(W)
+    k = float(resolution) / min(H, W)
+    H *= k
+    W *= k
+    H = int(np.round(H / 64.0)) * 64
+    W = int(np.round(W / 64.0)) * 64
+    img = cv2.resize(
+        input_image,
+        (W, H),
+        interpolation=cv2.INTER_LANCZOS4 if k > 1 else cv2.INTER_AREA,
+    )
+    return img
+
+
+def canny(
+    image,
+    use_cuda=False,
+    t_lower=2,
+    t_upper=10,
+    aperture_size=5,
+    image_resolution=64,
+):
+    image = np.transpose(image, (1, 2, 0))
+    img = HWC3(np.uint8(image))
+    edge_map2 = cv2.Canny(img, t_lower, t_upper)
+    edge_map = HWC3(edge_map2)
+
+    # plt.figure(figsize=(10, 5))
+
+    # plt.subplot(1, 2, 1)
+    # plt.title("Original Image")
+    # plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+    # plt.subplot(1, 2, 2)
+    # plt.title("Canny Edge Detection")
+    # plt.imshow(edge_map2)
+
+    # plt.show()
+
+    edge_map_torch = torch.from_numpy(edge_map.copy()).float() / 255.0
+    edge_map_torch = einops.rearrange(edge_map_torch, "h w c -> c h w")
+    return edge_map_torch
 
 
 class RobotDatasetSeqScene(Dataset):
@@ -142,6 +211,36 @@ class RobotDatasetSeqScene(Dataset):
 
             # actions_normalized = torch.cat([positions, euler_angles], dim=1)
             return actions
+
+
+class RobotDatasetSeqSceneCanny(RobotDatasetSeqScene):
+    def __init__(self, data_path, transform=None, img_size=120, seq_l=45):
+        super().__init__(data_path, transform, img_size, seq_l)
+
+    def __getitem__(self, idx):
+        data_obs_i = self.data[idx]
+        s, w, h, c = data_obs_i["image_after_action"].shape
+        data_trans = torch.zeros((s, c, self.img_size, self.img_size))
+        if self.transform:
+            initial_img = self.transform(data_obs_i["image_current"])
+            data_trans = torch.stack(
+                [self.transform(img) for img in data_obs_i["image_after_action"]]
+            )
+
+        data_trans, action_torch = self.extract_first_last_random_frames_tensor(
+            data_trans,
+            torch.from_numpy(np.array(data_obs_i["action"])),
+            self.sequence_l,
+        )
+
+        canny_v = torch.stack([canny(img.detach().cpu().numpy()) for img in data_trans])
+        action_nm = self.normalize_action_torch(
+            action_torch,
+            pos_range=(self.min, self.max),
+            method="min-max",
+        ).squeeze()
+
+        return (initial_img, data_trans, action_nm, canny_v)
 
 
 def collate_fn(batch):
