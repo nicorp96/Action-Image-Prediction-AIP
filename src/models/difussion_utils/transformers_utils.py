@@ -169,10 +169,6 @@ class Attention(nn.Module):
 
 
 class DiTBlockJoint(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
-
     def __init__(
         self,
         hidden_size,
@@ -222,3 +218,82 @@ class DiTBlockJoint(nn.Module):
         )
         out = torch.cat((x, a), dim=1)
         return out
+
+
+class MMDiTBlockJoint(nn.Module):
+    """
+    Scaling Rectified Flow Transformers for High-Resolution Image Synthesis
+    https://arxiv.org/pdf/2403.03206
+    """
+
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        attention_mode="math",
+        **block_kwargs,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.lin1 = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        self.lin2 = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+
+        self.attn1 = nn.MultiheadAttention(
+            embed_dim=hidden_size, num_heads=num_heads, device="cuda:0"
+        )
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.lin3 = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.lin4 = nn.Linear(hidden_size, hidden_size, bias=True)
+
+        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm4 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=approx_gelu,
+            drop=0,
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+        self.adaLN_modulation_x = nn.Sequential(
+            nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, a, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.adaLN_modulation(c).chunk(6, dim=1)
+        )
+
+        shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = (
+            self.adaLN_modulation_x(c).chunk(6, dim=1)
+        )
+        a_q, a_k, a_v = self.lin1(modulate(self.norm1(a), shift_msa, scale_msa)).chunk(
+            3, dim=2
+        )
+        x_q, x_k, x_v = self.lin2(
+            modulate(self.norm2(x), shift_msa_x, scale_msa_x)
+        ).chunk(3, dim=2)
+        x = torch.cat((x, a), dim=1)
+        query = torch.cat((x_q, a_q), dim=1)
+        key = torch.cat((x_k, a_k), dim=1)
+        value = torch.cat((x_v, a_v), dim=1)
+        x_c, _ = self.attn1(query, key, value)
+        a_att = gate_msa.unsqueeze(1) * self.lin3(x_c) + a
+        a_out = (
+            gate_mlp.unsqueeze(1)
+            * self.mlp(modulate(self.norm3(a_att), shift_mlp, scale_mlp))
+            + a
+        )
+        x_att = gate_msa_x.unsqueeze(1) * self.lin4(x_c) + x
+        x_out = (
+            gate_mlp_x.unsqueeze(1)
+            * self.mlp(modulate(self.norm4(x_att), shift_mlp_x, scale_mlp_x))
+            + x
+        )
+        x = x_out + a_out
+        return x

@@ -11,7 +11,7 @@ trainer:
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
-  wandb_log: true
+  wandb_log: false
 
 model:
   type: "DiT"

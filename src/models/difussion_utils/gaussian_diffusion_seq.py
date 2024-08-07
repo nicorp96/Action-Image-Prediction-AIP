@@ -3,7 +3,6 @@
 import numpy as np
 import torch
 from . import gaussian_diffusion as gd
-from timm.models.vision_transformer import Attention
 import torch.nn as nn
 from einops import rearrange
 

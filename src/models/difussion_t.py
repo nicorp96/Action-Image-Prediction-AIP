@@ -4,7 +4,11 @@ import numpy as np
 from timm.models.vision_transformer import PatchEmbed, Mlp
 import math
 from einops import rearrange, repeat
-from .difussion_utils.transformers_utils import Attention, DiTBlockJoint
+from .difussion_utils.transformers_utils import (
+    Attention,
+    DiTBlockJoint,
+    MMDiTBlockJoint,
+)
 
 
 def modulate(x, shift, scale):
@@ -1092,6 +1096,126 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
 
         # Replace DiTBlock with JointTransformerBlock
         self.first_block = DiTBlockJoint(
+            hidden_size, num_heads, mlp_ratio=mlp_ratio, attention_mode="math"
+        )
+
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+
+        pos_embed_act = get_2d_sincos_pos_embed(
+            self.pos_embed_act.shape[-1], int(self.mask_n**0.5)
+        )
+        self.pos_embed_act.data.copy_(
+            torch.from_numpy(pos_embed_act).float().unsqueeze(0)
+        )
+        self.img_c_embedder = nn.Linear(256, hidden_size)
+        self.final_layer_act = FinalLayer(hidden_size, self.seq_length + 1, action_dim)
+        self.downsample_layer = nn.Linear(847, 7)
+
+        nn.init.constant_(self.first_block.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.first_block.adaLN_modulation[-1].bias, 0)
+
+        nn.init.normal_(self.a_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.a_embedder.mlp[2].weight, std=0.02)
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer_act.linear.weight, 0)
+        nn.init.constant_(self.final_layer_act.linear.bias, 0)
+        nn.init.normal_(self.downsample_layer.weight, std=0.02)
+
+    def forward(self, x, t, a, img_c, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = self.a_embedder(a) + self.pos_embed_act  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        # Change to masked token
+        a = rearrange(a, "b f d -> (b f) d")
+        a = rearrange(a, "b (c h) -> (b c) h", c=5)
+        a = repeat(a, "b d -> b c d", c=1)
+        # x = torch.cat((x, a), dim=1)
+        # x = x + a
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 1))
+
+        y_feat = img_c.flatten(start_dim=1)
+        y_emb = self.img_c_embedder(y_feat)
+        c = timestep_spatial + y_emb
+        x = self.first_block(x, a, c)
+
+        for i in range(0, len(self.blocks), 2):
+            c = timestep_spatial + y_emb
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        c = timestep_spatial + y_emb
+
+        x_act = self.final_layer_act(x[:, 15:16, :], c)
+        x_act = torch.einsum("nhw->nhw", x_act)
+        x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
+        x_act = self.downsample_layer(x_act)
+        x = self.final_layer(x[:, :-1, :], c)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x, x_act
+
+
+class DiTActionFramesSeq5(DiTActionSeqAct):
+    def __init__(
+        self,
+        input_size=16,
+        patch_size=4,
+        in_channels=4,
+        hidden_size=1152,
+        depth=28,
+        num_heads=16,
+        mlp_ratio=4,
+        action_dim=6,
+        learn_sigma=True,
+        seq_l=16,
+        mask_n=2,
+    ):
+        super().__init__(
+            input_size,
+            patch_size,
+            in_channels,
+            hidden_size,
+            depth,
+            num_heads,
+            mlp_ratio,
+            action_dim,
+            learn_sigma,
+        )
+        self.seq_length = seq_l
+        self.mask_n = mask_n
+
+        self.a_embedder = ActionEmbedder(hidden_size * 5, action_dim)
+
+        self.pos_embed_act = nn.Parameter(
+            torch.zeros(1, self.mask_n, hidden_size * 5), requires_grad=False
+        )
+
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_length, hidden_size), requires_grad=False
+        )
+
+        self.first_block = MMDiTBlockJoint(
             hidden_size, num_heads, mlp_ratio=mlp_ratio, attention_mode="math"
         )
 

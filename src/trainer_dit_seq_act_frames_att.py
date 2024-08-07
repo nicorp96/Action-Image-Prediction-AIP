@@ -12,6 +12,7 @@ from src.models.difussion_t import (
     DiTActionFramesSeq2,
     DiTActionFramesSeq3,
     DiTActionFramesSeq4,
+    DiTActionFramesSeq5,
 )
 from collections import OrderedDict
 from copy import deepcopy
