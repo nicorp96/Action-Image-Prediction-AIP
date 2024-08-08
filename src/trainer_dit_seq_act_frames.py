@@ -7,12 +7,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj, collate_fn
-from src.models.difussion_t import (
+from src.models.diffusion_transformer_action import (
     DiTActionFramesSeq,
     DiTActionFramesSeq2,
     DiTActionFramesSeq3,
     DiTActionFramesSeq4,
     DiTActionFramesSeq5,
+    DiTActionFramesSeq6,
 )
 from collections import OrderedDict
 from copy import deepcopy
@@ -54,6 +55,23 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
+def model_factory(model_config):
+    model_classes = {
+        "DiTActionFramesSeq": DiTActionFramesSeq,
+        "DiTActionFramesSeq2": DiTActionFramesSeq2,
+        "DiTActionFramesSeq3": DiTActionFramesSeq3,
+        "DiTActionFramesSeq4": DiTActionFramesSeq4,
+        "DiTActionFramesSeq5": DiTActionFramesSeq5,
+        "DiTActionFramesSeq6": DiTActionFramesSeq6,
+    }
+    type = model_config["type"]
+    if type not in model_classes:
+        raise ValueError(f"Unknown model type: {type}")
+
+    model_class = model_classes[type]
+    return model_class(model_config)
+
+
 class DiTTrainerActFrames(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
@@ -72,18 +90,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionFramesSeq5(
-            input_size=model_config["input_size"],
-            patch_size=model_config["patch_size"],
-            in_channels=model_config["in_channels"],
-            hidden_size=model_config["hidden_size"],
-            depth=model_config["depth"],
-            num_heads=model_config["num_heads"],
-            mlp_ratio=model_config["mlp_ratio"],
-            action_dim=model_config["action_dim"],
-            learn_sigma=model_config["learn_sigma"],
-            seq_l=model_config["seq_len"],
-        )
+        self.model_dit = model_factory(model_config)
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
         )
@@ -264,7 +271,7 @@ class DiTTrainerActFrames(TrainerBase):
             update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
 
-            if step % 500 == 0:
+            if step % 5000 == 0:
                 self.save_image_actions(
                     step=step,
                     x=x,

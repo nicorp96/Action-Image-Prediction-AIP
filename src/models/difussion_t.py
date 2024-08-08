@@ -7,6 +7,7 @@ from einops import rearrange, repeat
 from .difussion_utils.transformers_utils import (
     Attention,
     DiTBlockJoint,
+    DiTBlockJoint2,
     MMDiTBlockJoint,
 )
 
@@ -124,28 +125,6 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
-        return x
-
-
-class FinalLayer(nn.Module):
-    """
-    The final layer of DiT.
-    """
-
-    def __init__(self, hidden_size, patch_size, out_channels):
-        super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(
-            hidden_size, patch_size * patch_size * out_channels, bias=True
-        )
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
-
-    def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
         return x
 
 
@@ -709,11 +688,6 @@ class DiTActionFramesSeq(DiTActionSeqAct):
         a = rearrange(a, "b f d -> (b f) d")
         a = repeat(a, "b d -> b c d", c=1)
         x = torch.cat((x, a), dim=1)
-
-        # timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
-        # y_feat = img_c.flatten(start_dim=1)
-        # y_emb = self.img_c_embedder(y_feat)
-        # c = timestep_spatial + y_emb
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
         timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 1))
         y_feat = img_c.flatten(start_dim=1)
@@ -731,19 +705,6 @@ class DiTActionFramesSeq(DiTActionSeqAct):
             x = temp_block(x, c)
             x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
         x_b = x
-        # for block in self.blocks:
-        #     x_b = block(x, c)  # (N, T, D)
-        #      x_b[:, :-1, :], c
-        # )  # (N, T, patch_size ** 2 * out_channels)
-        # x_act = self.final_layer_act(x_b[:, 15:16, :], c)
-        # x_act = torch.einsum("nhw->nhw", x_act)
-        # x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
-        # x_act = self.downsample_layer(x_act)
-        # x = self.unpatchify(x)  # (N, out_channels, H, W)
-        # x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
-        # x = self.final_layer(
-        #     x_b[:, :-1, :], c
-        # )  # (N, T, patch_size ** 2 * out_channels)
         c = timestep_spatial + y_emb
         x_act = self.final_layer_act(x_b[:, 15:16, :], c)
         x_act = torch.einsum("nhw->nhw", x_act)
@@ -912,11 +873,6 @@ class DiTActionFramesSeq2(DiTActionSeqAct):
         a = rearrange(a, "b f d -> (b f) d")
         a = rearrange(a, "b (c h) -> (b c) h", c=8)
         a = repeat(a, "b d -> b c d", c=1)
-        # a_ext = torch.zeros_like(x).to(x.device)
-        # b, f, h = a.shape
-        # a_ext[:b, :f, :h] = a
-        # a = rearrange(a, "b c d -> (b c) d")
-        # a = repeat(a, "b d -> b c d", c=1)
         x = torch.cat((x, a), dim=1)
         # x = x + a
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
