@@ -10,6 +10,7 @@ trainer:
   weight_decay: 0
   cuda_num: 0
   wandb_log: false
+  val_num: 5000
 
 model:
   type: "DiT"

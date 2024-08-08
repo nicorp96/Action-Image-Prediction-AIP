@@ -7,8 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
-from src.models.difussion_t import DiTActionSeq
-from collections import OrderedDict
+from src.models.diffusion_frame_pred import DiTActionSeq
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq
 from diffusers.models import AutoencoderKL
@@ -21,27 +20,7 @@ from sklearn.manifold import TSNE
 import wandb
 import yaml
 from einops import rearrange
-
-
-@torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
-    """
-    Step the EMA model towards the current model.
-    """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
-
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-
-def requires_grad(model, flag=True):
-    """
-    Set requires_grad flag for all parameters in a model.
-    """
-    for p in model.parameters():
-        p.requires_grad = flag
+from .utils import update_ema, requires_grad
 
 
 class DiTTrainerActScene(TrainerBase):
@@ -179,6 +158,8 @@ class DiTTrainerActScene(TrainerBase):
         step = 0
         for epoch in range(self.n_epochs):
             train_loss = self._train_one_epoch(step)
+            if self.config["trainer"]["wandb_log"]:
+                wandb.log({"loss": train_loss})
             val_loss = self._validate_one_epoch() if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
@@ -186,6 +167,8 @@ class DiTTrainerActScene(TrainerBase):
             )
             if val_loss is not None:
                 print(f", Validation Loss: {val_loss:.4f}")
+                if self.config["trainer"]["wandb_log"]:
+                    wandb.log({"val_loss": val_loss})
                 if val_loss < best_loss:
                     best_loss = val_loss
                     self._save_checkpoint()
@@ -223,15 +206,13 @@ class DiTTrainerActScene(TrainerBase):
                 self.model_ddp, x, t, model_kwargs
             )
             loss = loss_dict["loss"].mean()
-            if self.config["trainer"]["wandb_log"]:
-                wandb.log({"loss": loss})
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             update_ema(self.ema, self.model_ddp.module)
             running_loss += loss.item()
 
-            if step % 200 == 0:
+            if step % self.config["trainer"]["val_num"] == 0:
                 with torch.no_grad():
                     model_kwargs = dict(a=action, mask_frame_num=2)
                     z = torch.randn_like(

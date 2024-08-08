@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj, collate_fn
-from src.models.difussion_t import (
+from src.models.diffusion_transformer_action import (
     DiTActionFramesSeq,
     DiTActionFramesSeq2,
     DiTActionFramesSeq3,
@@ -30,27 +30,7 @@ from einops import rearrange
 from diffusers.optimization import get_scheduler
 from src.metrics.video_metrics import VideoMetrics
 import os
-
-
-@torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
-    """
-    Step the EMA model towards the current model.
-    """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
-
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-
-def requires_grad(model, flag=True):
-    """
-    Set requires_grad flag for all parameters in a model.
-    """
-    for p in model.parameters():
-        p.requires_grad = flag
+from .utils import update_ema, requires_grad
 
 
 class DiTTrainerActFramesAtt(TrainerBase):

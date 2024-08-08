@@ -8,7 +8,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.trainer_base import TrainerBase
 from src.dataset.data_set import RobotDataset
-from src.models.difussion_t import DiTAction
+from src.models.diffusion_dit_base import DiTAction
 from collections import OrderedDict
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion

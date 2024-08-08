@@ -6,8 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
-from src.models.difussion_t import DiTActionSeqISim
-from collections import OrderedDict
+from src.models.diffusion_frame_pred import DiTActionSeqISim
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq
 from diffusers.models import AutoencoderKL
@@ -21,27 +20,8 @@ import wandb
 import yaml
 from einops import rearrange
 import os
-
-
-@torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
-    """
-    Step the EMA model towards the current model.
-    """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
-
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-
-def requires_grad(model, flag=True):
-    """
-    Set requires_grad flag for all parameters in a model.
-    """
-    for p in model.parameters():
-        p.requires_grad = flag
+from .utils import update_ema, requires_grad
+from src.metrics.video_metrics import VideoMetrics
 
 
 class DiTTrainerScene(TrainerBase):
@@ -80,7 +60,7 @@ class DiTTrainerScene(TrainerBase):
         self.eval_save_gen_dir = os.path.join(
             base, self.config["trainer"]["eval_save_gen"]
         )
-
+        self.mask_num = model_config["mask_n"]
         self.ema = deepcopy(self.model_dit).to(
             self.device
         )  # Create an EMA of the model for use after training
@@ -91,7 +71,7 @@ class DiTTrainerScene(TrainerBase):
             timestep_respacing=self.config["diffusion"]["timestep_respacing"],
             learn_sigma=model_config["learn_sigma"],
         )
-
+        self.metrics = VideoMetrics(device=self.device)
         # Load VAE
         vae_config = self.config["vae"]
         self.vae = AutoencoderKL.from_pretrained(
@@ -182,9 +162,11 @@ class DiTTrainerScene(TrainerBase):
         self.ema.eval()  # EMA model should always be in eval mode
         best_loss = float("inf")
         step = 0
+        val_loss = None
         for epoch in range(self.n_epochs):
             train_loss = self._train_one_epoch(step)
-            val_loss = self._validate_one_epoch() if self.val_loader else None
+            if step % self.config["trainer"]["val_num"] == 0:
+                val_loss = self._validate_one_epoch() if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
@@ -236,7 +218,7 @@ class DiTTrainerScene(TrainerBase):
             update_ema(self.ema, self.model_ddp.module)
             running_loss += loss.item()
 
-            if step % 200 == 0:
+            if step % self.config["trainer"]["val_num"] == 0:
                 with torch.no_grad():
                     model_kwargs = dict(a=action, mask_frame_num=2)
                     z = torch.randn_like(
@@ -295,6 +277,48 @@ class DiTTrainerScene(TrainerBase):
 
     def _save_checkpoint(self):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
+
+    def save_image_actions(self, step, x, next_seq, actions_real):
+        model_kwargs = dict(a=actions_real, mask_frame_num=2)
+        b, _, _, _, _ = x.shape
+        z = torch.randn_like(
+            x,
+            device=self.device,
+        )
+        z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
+        samples = self.diffusion_s.p_sample_loop(
+            self.ema,
+            z.shape,
+            z,
+            clip_denoised=False,
+            progress=True,
+            model_kwargs=model_kwargs,
+            device=self.device,
+        )
+        samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
+        samples = self.vae.decode(samples / 0.18215).sample
+        samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
+        batchsize = np.random.choice(b)
+        save_image(
+            samples[batchsize, :, :, :, :],
+            self.eval_save_gen_dir + f"_{step}.png",
+            nrow=5,
+            normalize=True,
+            value_range=(-1, 1),
+        )
+        save_image(
+            next_seq[batchsize, :, :, :, :],
+            self.eval_save_real_dir + f"_{step}.png",
+            nrow=5,
+            normalize=True,
+            value_range=(-1, 1),
+        )
+        avg_psnr, avg_ssim = self.metrics.evaluate_video(
+            samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
+        )
+        if self.config["trainer"]["wandb_log"]:
+            wandb.log({"psnr": avg_psnr})
+            wandb.log({"ssim": avg_ssim})
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj, collate_fn
+from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj
 from src.models.diffusion_transformer_action import (
     DiTActionFramesSeq,
     DiTActionFramesSeq2,
@@ -15,7 +15,6 @@ from src.models.diffusion_transformer_action import (
     DiTActionFramesSeq5,
     DiTActionFramesSeq6,
 )
-from collections import OrderedDict
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
@@ -24,7 +23,6 @@ from src.trainer_base import TrainerBase
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.manifold import TSNE
 import wandb
 import yaml
 from einops import rearrange
@@ -32,27 +30,7 @@ from src.utils import unnormilize_action_seq__torch
 from diffusers.optimization import get_scheduler
 from src.metrics.video_metrics import VideoMetrics
 import os
-
-
-@torch.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
-    """
-    Step the EMA model towards the current model.
-    """
-    ema_params = OrderedDict(ema_model.named_parameters())
-    model_params = OrderedDict(model.named_parameters())
-
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-
-def requires_grad(model, flag=True):
-    """
-    Set requires_grad flag for all parameters in a model.
-    """
-    for p in model.parameters():
-        p.requires_grad = flag
+from .utils import update_ema, requires_grad
 
 
 def model_factory(model_config):
@@ -103,7 +81,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.eval_act_save_real_dir = os.path.join(
             base, self.config["trainer"]["action_save_real"]
         )
-
+        self.mask_num = model_config["mask_n"]
         self.ema = deepcopy(self.model_dit).to(
             self.device
         )  # Create an EMA of the model for use after training
@@ -208,9 +186,11 @@ class DiTTrainerActFrames(TrainerBase):
         self.ema.eval()  # EMA model should always be in eval mode
         best_loss = float("inf")
         step = 0
+        val_loss = None
         for epoch in range(self.n_epochs):
             train_loss = self._train_one_epoch(step)
-            val_loss = self._validate_one_epoch() if self.val_loader else None
+            if step % self.config["trainer"]["val_num"] == 0:
+                val_loss = self._validate_one_epoch() if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
@@ -271,7 +251,7 @@ class DiTTrainerActFrames(TrainerBase):
             update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
 
-            if step % 5000 == 0:
+            if step % self.config["trainer"]["val_num"] == 0:
                 self.save_image_actions(
                     step=step,
                     x=x,
@@ -286,9 +266,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for current_img, next_seq, action in tqdm(
-                self.data_loader, desc="Training"
-            ):
+            for current_img, next_seq, action in tqdm(self.val_loader, desc="Training"):
                 current_img, next_seq, action = (
                     current_img.to(device=self.device, dtype=torch.float32),
                     next_seq.to(self.device, dtype=torch.float32),
@@ -308,7 +286,7 @@ class DiTTrainerActFrames(TrainerBase):
                     x,
                     device=self.device,
                 )
-                z[:, :2, :, :] = x[:, :2, :, :]
+                z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
                 samples, actions_pred = self.diffusion_s.p_sample_loop(
                     self.ema,
                     z.shape,
@@ -343,7 +321,7 @@ class DiTTrainerActFrames(TrainerBase):
                 x,
                 device=self.device,
             )
-            z[:, :2, :, :] = x[:, :2, :, :]
+            z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
             samples, actions_pred = self.diffusion_s.p_sample_loop(
                 self.ema,
                 z.shape,
