@@ -250,7 +250,7 @@ class DiTActionSeqISimMultiCondi(DiTActionSeq):
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
         )
         self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
-        self.condition_emb = ConditionEmbedding(out_dim=96)
+        self.condition_emb = ConditionEmbedding(out_dim=96 * 5)
 
     def forward(self, x, t, a, c_m, mask_frame_num=None):
         """
@@ -266,9 +266,10 @@ class DiTActionSeqISimMultiCondi(DiTActionSeq):
         a = rearrange(a, "b f d -> (b f) d")
         a = self.a_embedder(a)  # (N, D) Action embedding
         t = self.t_embedder(t)  # (N, D)
-        c_m = rearrange(c_m, "b l c w h-> (b l) c w h")
+        c_m = rearrange(c_m, "b l c w h-> (b l) c w h")  # [32*2, 3, 64, 64]
         canny_emb = self.condition_emb(c_m)
-        canny_emb = rearrange(canny_emb, "b c w h -> b (c w h)")
+        canny_emb = canny_emb.flatten()
+        canny_emb = rearrange(canny_emb, "(b h) -> b h", b=a.shape[0])
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
         timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
 

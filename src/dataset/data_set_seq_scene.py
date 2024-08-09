@@ -10,6 +10,7 @@ from collections import OrderedDict
 import cv2
 import einops
 import matplotlib.pyplot as plt
+from .utils_ds import DataProcessor
 
 
 def HWC3(x):
@@ -216,6 +217,7 @@ class RobotDatasetSeqScene(Dataset):
 class RobotDatasetSeqSceneCanny(RobotDatasetSeqScene):
     def __init__(self, data_path, transform=None, img_size=120, seq_l=45):
         super().__init__(data_path, transform, img_size, seq_l)
+        self.data_proc = DataProcessor()
 
     def __getitem__(self, idx):
         data_obs_i = self.data[idx]
@@ -233,7 +235,12 @@ class RobotDatasetSeqSceneCanny(RobotDatasetSeqScene):
             self.sequence_l,
         )
 
-        canny_v = torch.stack([canny(img.detach().cpu().numpy()) for img in data_trans])
+        canny_v = torch.stack(
+            [
+                self.data_proc.calculate_normals(img.detach().cpu().numpy())
+                for img in data_trans
+            ]
+        )
         action_nm = self.normalize_action_torch(
             action_torch,
             pos_range=(self.min, self.max),
@@ -273,24 +280,20 @@ if __name__ == "__main__":
         ]
     )
 
-    rd_ds = RobotDatasetSeqScene(
+    rd_ds = RobotDatasetSeqSceneCanny(
         data_path="/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/data/dynamic_scene",
         transform=transform,
     )
 
-    data_loader = DataLoader(rd_ds, batch_size=64, shuffle=True, collate_fn=collate_fn)
+    data_loader = DataLoader(rd_ds, batch_size=64, shuffle=True)
 
-    for step, (current_image, next_image, action) in enumerate(data_loader):
-        print(next_image.size())
-        print(action.size())
+    for step, (current_image, next_image, action, canny) in enumerate(data_loader):
         image_path = os.path.join(
             "/home/nrodriguez/Documents/research-image-pred/Action-Image-Prediction-AIP/w/",
             f"img_{step}.png",
         )
         vutils.save_image(
-            next_image.view(
-                -1, next_image.size(-3), next_image.size(-2), next_image.size(-1)
-            ),
+            canny.view(-1, canny.size(-3), next_image.size(-2), next_image.size(-1)),
             image_path,
             normalize=True,
         )

@@ -197,7 +197,9 @@ class DiTTrainerSceneMC(TrainerBase):
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
 
-            model_kwargs = dict(a=action, c_m=canny, mask_frame_num=2)
+            model_kwargs = dict(
+                a=action, c_m=canny[:, : self.mask_num, :, :], mask_frame_num=2
+            )
             loss_dict = self.diffusion_s.training_losses(
                 self.model_ddp, x, t, model_kwargs
             )
@@ -235,7 +237,9 @@ class DiTTrainerSceneMC(TrainerBase):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
 
     def save_image_actions(self, step, x, next_seq, actions_real, canny):
-        model_kwargs = dict(a=actions_real, c_m=canny, mask_frame_num=2)
+        model_kwargs = dict(
+            a=actions_real, c_m=canny[:, : self.mask_num, :, :], mask_frame_num=2
+        )
         b, f, c, h, w = x.shape
         z = torch.randn_like(
             x,

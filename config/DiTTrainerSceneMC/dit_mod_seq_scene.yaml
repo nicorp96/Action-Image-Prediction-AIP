@@ -4,8 +4,8 @@ trainer:
   image_size: 64
   n_epochs: 20005
   data_path: "data/dynamic_scene"
-  eval_save_real: "results/diffusion_seq_scene/without_xarm/real/epoch"
-  eval_save_gen: "results/diffusion_seq_scene/without_xarm/gen/epoch"
+  eval_save_real: "results/diffusion_seq_scene/DiTTrainerSceneMC/real/epoch"
+  eval_save_gen: "results/diffusion_seq_scene/DiTTrainerSceneMC/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
@@ -23,7 +23,7 @@ model:
   mlp_ratio: 4.0
   action_dim: 7
   learn_sigma: false
-  seq_len: 16
+  seq_len: 10
   mask_n: 2
 
 diffusion:
