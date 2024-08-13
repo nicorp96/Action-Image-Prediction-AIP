@@ -133,8 +133,8 @@ class DiTTrainerSceneMC(TrainerBase):
         ), f"Batch size must be divisible by the world size."
         self.rank = dist.get_rank()
         self.device = torch.device(
-            self.cuda_num
-        )  # self.rank % torch.cuda.device_count()
+            self.rank % torch.cuda.device_count()
+        )  # self.cuda_num
         self.seed = self.global_seed * dist.get_world_size() + self.rank
         torch.manual_seed(self.seed)
         torch.cuda.set_device(self.device)

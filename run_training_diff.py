@@ -49,6 +49,7 @@ def main():
                 "DiTTrainerActFrames",
                 "DiTTrainerActFramesAtt",
                 "DiTTrainerSceneMC",
+                "DiTTrainerScene",
             ],
         )
 

@@ -26,6 +26,7 @@ model:
   action_dim: 7
   learn_sigma: false
   seq_len: 10
+  mask_n: 2
 
 diffusion:
   timestep_respacing: ""

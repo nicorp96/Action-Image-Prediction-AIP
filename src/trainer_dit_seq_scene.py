@@ -6,7 +6,11 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
-from src.models.diffusion_frame_pred import DiTActionSeqISim
+from src.models.diffusion_frame_pred import (
+    DiTActionSeqISim,
+    DiTActionSeqFrameAtt,
+    DiTActionSeqFrameMultAtt,
+)
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq
 from diffusers.models import AutoencoderKL
@@ -41,18 +45,7 @@ class DiTTrainerScene(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionSeqISim(
-            input_size=model_config["input_size"],
-            patch_size=model_config["patch_size"],
-            in_channels=model_config["in_channels"],
-            hidden_size=model_config["hidden_size"],
-            depth=model_config["depth"],
-            num_heads=model_config["num_heads"],
-            mlp_ratio=model_config["mlp_ratio"],
-            action_dim=model_config["action_dim"],
-            learn_sigma=model_config["learn_sigma"],
-            seq_len=model_config["seq_len"],
-        )
+        self.model_dit = DiTActionSeqFrameAtt(model_config)
 
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
@@ -110,7 +103,7 @@ class DiTTrainerScene(TrainerBase):
             num_workers=2,
             pin_memory=True,
             drop_last=True,
-            collate_fn=collate_fn,
+            # collate_fn=collate_fn,
         )
 
         self.val_loader = (
