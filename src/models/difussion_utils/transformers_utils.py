@@ -114,6 +114,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.eps = 1e-3
+        self.bucket_size = 4
+        self.kv_mask = None
         if block_kwargs is not None:
             for k in block_kwargs.keys():
                 if k == "kv_mask":
@@ -186,7 +188,7 @@ class Attention(nn.Module):
             q, k, v = qkv.unbind(0)
 
             b, h, n, e, dtype = *q.shape, q.dtype
-            self.bucket_size = 64 if not self.bucket_size is None else self.bucket_size
+            self.bucket_size = 4 if not self.bucket_size is None else self.bucket_size
             self.bucket_size = max(self.bucket_size, 1)
             assert (
                 self.bucket_size == 0 or (n % self.bucket_size) == 0

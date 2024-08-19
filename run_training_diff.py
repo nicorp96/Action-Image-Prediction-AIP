@@ -6,6 +6,7 @@ from src.trainer_dit_seq_act_frames import DiTTrainerActFrames
 from src.trainer_dit_seq_act_frames_att import DiTTrainerActFramesAtt
 from src.trainer_dit_seq_scene import DiTTrainerScene
 from src.trainer_dit_seq_scene_mc import DiTTrainerSceneMC
+from src.trainer_dit_pnn import DiTTrainerPNN
 import os
 import argparse
 
@@ -20,6 +21,7 @@ def get_trainer(trainer_type, config):
         "DiTTrainerScene": DiTTrainerScene,
         "DiTTrainerActFramesAtt": DiTTrainerActFramesAtt,
         "DiTTrainerSceneMC": DiTTrainerSceneMC,
+        "DiTTrainerPNN": DiTTrainerPNN,
     }
     if trainer_type in trainers:
         return trainers[trainer_type](config)
@@ -50,6 +52,7 @@ def main():
                 "DiTTrainerActFramesAtt",
                 "DiTTrainerSceneMC",
                 "DiTTrainerScene",
+                "DiTTrainerPNN",
             ],
         )
 

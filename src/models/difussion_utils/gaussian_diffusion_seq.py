@@ -302,7 +302,9 @@ class GaussianDiffusionSeq:
         sample = (
             out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         )
-        sample[:, :2, :, :, :] = x[:, :2, :, :, :]
+        sample[:, : model_kwargs["mask_frame_num"], :, :, :] = x[
+            :, : model_kwargs["mask_frame_num"], :, :, :
+        ]
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
 
     def p_sample_loop(
@@ -1232,9 +1234,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
         x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-        a_t = x_action[
-            :, :mask_frame_num, :
-        ]  # self.q_sample(x_action, t, noise=action_noised)
+        a_t = x_action[:, :, :]  # self.q_sample(x_action, t, noise=action_noised)
         model_kwargs["a"] = a_t
 
         if (
