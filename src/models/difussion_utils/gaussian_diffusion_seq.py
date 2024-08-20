@@ -1234,8 +1234,8 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
         x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-        a_t = x_action[:, :, :]  # self.q_sample(x_action, t, noise=action_noised)
-        model_kwargs["a"] = a_t
+        a_t = x_action[:, :]  # self.q_sample(x_action, t, noise=action_noised)
+        # model_kwargs["a"] = a_t
 
         if (
             self.loss_type == gd.LossType.KL
@@ -1318,7 +1318,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             )
 
             terms["mse_act"] = gd.mean_flat((target_act - act_out) ** 2)
-
+            terms["act_out"] = act_out
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
                 terms["loss_act"] = terms["mse_act"] + terms["vb_act"]

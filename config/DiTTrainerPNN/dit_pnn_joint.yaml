@@ -15,7 +15,7 @@ trainer:
   val_num: 1000
 
 model:
-  type: "DiTActionFramesSeq"
+  type: "DiTActionFramesSeqJoint"
   input_size: 16
   patch_size: 2
   in_channels: 4
@@ -23,7 +23,7 @@ model:
   depth: 4
   num_heads: 6
   mlp_ratio: 4.0
-  action_dim: 3
+  action_dim: 10
   learn_sigma: false
   seq_len: 4
   mask_n: 1

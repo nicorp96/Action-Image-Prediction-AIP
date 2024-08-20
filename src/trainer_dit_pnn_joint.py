@@ -6,9 +6,11 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from src.dataset.data_set_set_pinn import DatasetObjectSeqTrj, DatasetObjectSeqTrjTest
-from src.models.diffusion_trans_pnn import DiTActionFramesSeq, DiTActionSeqAct, PINN
-from src.models.difussion_utils.schedule import create_diffusion_seq
+from src.dataset.data_set_set_pinn import DatasetObjectSeqTrj
+from src.models.diffusion_trans_pnn import (
+    DiTActionFramesSeqJoint,
+)
+from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
@@ -27,7 +29,7 @@ import copy
 
 def model_factory(model_config):
     model_classes = {
-        "DiTActionFramesSeq": DiTActionFramesSeq,
+        "DiTActionFramesSeqJoint": DiTActionFramesSeqJoint,
     }
     type = model_config["type"]
     if type not in model_classes:
@@ -37,7 +39,7 @@ def model_factory(model_config):
     return model_class(model_config)
 
 
-class DiTTrainerPNN(TrainerBase):
+class DiTTrainerPNNJoint(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
@@ -56,7 +58,6 @@ class DiTTrainerPNN(TrainerBase):
         # Model settings
         model_config = self.config["model"]
         self.model_dit = model_factory(model_config)
-        self.pinn = PINN(input_size=100, output_size=200).to(self.device)
 
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
@@ -72,8 +73,8 @@ class DiTTrainerPNN(TrainerBase):
         )
         self.mask_num = model_config["mask_n"]
         self.alpha = 1.0
-        self.omega = 0.001
-        self.gamma = 1.00
+        self.omega = 1.0
+        self.gamma = 1.0
         # self.ema = deepcopy(self.model_dit).to(
         #     self.device
         # )  # Create an EMA of the model for use after training
@@ -84,7 +85,7 @@ class DiTTrainerPNN(TrainerBase):
             # find_unused_parameters=True,
         )
 
-        self.diffusion_s = create_diffusion_seq(
+        self.diffusion_s = create_diffusion_seq_act(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"],
             learn_sigma=self.config["model"]["learn_sigma"],
         )
@@ -110,9 +111,7 @@ class DiTTrainerPNN(TrainerBase):
         self.dataset = DatasetObjectSeqTrj(
             data_path=self.data_path, transform=transform, seq_l=model_config["seq_len"]
         )
-        val_dataset = DatasetObjectSeqTrjTest(
-            data_path=self.data_path, transform=transform, seq_l=model_config["seq_len"]
-        )
+
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -133,7 +132,7 @@ class DiTTrainerPNN(TrainerBase):
         )
 
         self.val_loader = (
-            DataLoader(val_dataset, batch_size=10, shuffle=False)
+            DataLoader(val_dataset, batch_size=32, shuffle=False)
             if val_dataset
             else None
         )
@@ -188,7 +187,7 @@ class DiTTrainerPNN(TrainerBase):
         for epoch in range(self.n_epochs):
             train_loss = self._train_one_epoch(step)
             if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate_one_epoch(step) if self.val_loader else None
+                val_loss = self._validate_one_epoch() if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
@@ -209,7 +208,6 @@ class DiTTrainerPNN(TrainerBase):
 
     def _train_one_epoch(self, step):
         self.model_ddp.train()
-        self.pinn.train()
         running_loss = 0.0
         for frames_t, positions, orientations, velocity, time in tqdm(
             self.data_loader, desc="Training"
@@ -235,12 +233,14 @@ class DiTTrainerPNN(TrainerBase):
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
 
-            position_pred = self.pinn(initial_position, time, initial_velocity)
+            initial_params = torch.cat(
+                (initial_position, time, initial_velocity), dim=1
+            )
             t_diff = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
             model_kwargs = dict(
-                a=position_pred,
+                a=initial_params,
                 # img_c=x[:, : self.mask_num, :, :, :],
                 mask_frame_num=self.mask_num,
             )
@@ -248,8 +248,9 @@ class DiTTrainerPNN(TrainerBase):
                 self.model_ddp, x, t_diff, model_kwargs
             )
             loss = loss_dict["loss"].mean()
-            loss_pos = self.loss_act(position_pred, positions)
-            loss_phy = self.physic_loss(position_pred, time, velocity)
+            loss_pos = loss_dict["loss_act"].mean()
+            print(loss_dict["act_out"].size())
+            loss_phy = self.physic_loss(loss_dict["act_out"], time, velocity)
 
             if self.config["trainer"]["wandb_log"]:
                 wandb.log({"loss": loss})
@@ -265,19 +266,18 @@ class DiTTrainerPNN(TrainerBase):
             # update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
 
-            # if step % self.config["trainer"]["val_num"] == 0:
-            #     self.save_image_actions(
-            #         step=step,
-            #         x=x,
-            #         frames=frames_t,
-            #         positions=positions,
-            #         initial_position=initial_position,
-            #         initial_velocity=initial_velocity,
-            #         time=time,
-            #         # goal_img=x[:, : self.mask_num, :, :, :],
-            #     )
-            #     self.model_ddp.train()
-            #     self.pinn.train()
+            if step % self.config["trainer"]["val_num"] == 0:
+                self.save_image_actions(
+                    step=step,
+                    x=x,
+                    frames=frames_t,
+                    positions=positions,
+                    initial_position=initial_position,
+                    initial_velocity=initial_velocity,
+                    time=time,
+                    # goal_img=x[:, : self.mask_num, :, :, :],
+                )
+                self.model_ddp.train()
 
         return running_loss
 
@@ -315,37 +315,46 @@ class DiTTrainerPNN(TrainerBase):
         phys_loss = torch.mean((speed_n * df - velocity) ** 2)
         return phys_loss
 
-    def _validate_one_epoch(self, step):
-        print("--------------------Evaluating------------------")
+    def _validate_one_epoch(self):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for frames_t, positions, orientations, velocity, time in tqdm(
-                self.val_loader, desc="Training"
-            ):
-                frames_t, positions, orientations, velocity, time = (
-                    frames_t.to(device=self.device, dtype=torch.float32),
-                    positions.to(self.device, dtype=torch.float32),
-                    orientations.to(self.device, dtype=torch.float32),
-                    velocity.to(self.device, dtype=torch.float32),
-                    time.to(self.device, dtype=torch.float32),
+            for current_img, next_seq, action in tqdm(self.val_loader, desc="Training"):
+                current_img, next_seq, action = (
+                    current_img.to(device=self.device, dtype=torch.float32),
+                    next_seq.to(self.device, dtype=torch.float32),
+                    action.to(self.device, dtype=torch.float32),
                 )
-                b, _, _, _, _ = frames_t.shape
-                x = rearrange(frames_t, "b f c h w -> (b f) c h w").contiguous()
+                b, _, _, _, _ = next_seq.shape
+                x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
-                initial_position = copy.deepcopy(positions[:, 0, :])
-                initial_velocity = copy.deepcopy(velocity[:, 0, :])
-                self.save_image_actions(
-                    step=step,
-                    x=x,
-                    frames=frames_t,
-                    positions=positions,
-                    initial_position=initial_position,
-                    initial_velocity=initial_velocity,
-                    time=time,
+                goal_img = (
+                    self.vae.encode(current_img[:1, :, :])
+                    .latent_dist.sample()
+                    .mul_(0.18215)
                 )
-
+                model_kwargs = dict(a=action, mask_frame_num=1, img_c=goal_img)
+                z = torch.randn_like(
+                    x,
+                    device=self.device,
+                )
+                z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
+                samples, actions_pred = self.diffusion_s.p_sample_loop(
+                    self.ema,
+                    z.shape,
+                    z,
+                    clip_denoised=False,
+                    progress=True,
+                    model_kwargs=model_kwargs,
+                    device=self.device,
+                )
+                samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
+                samples = self.vae.decode(samples / 0.18215).sample
+                samples = rearrange(
+                    samples, "(b f) c h w -> b f c h w", b=b
+                ).contiguous()
+                batchsize = np.random.choice(b)
         return running_loss / len(self.val_loader.dataset)
 
     def _save_checkpoint(self):
@@ -356,15 +365,16 @@ class DiTTrainerPNN(TrainerBase):
     ):  # , goal_img):
         b, _, _, _, _ = x.shape
         self.model_ddp.eval()
-        self.pinn.eval()
         with torch.no_grad():
             # action_n = torch.randn_like(
             #     actions_real,
             #     device=self.device,
             # )
-            position_pred = self.pinn(initial_position, time, initial_velocity)
+            initial_params = torch.cat(
+                (initial_position, time, initial_velocity), dim=1
+            )
             model_kwargs = dict(
-                a=position_pred, mask_frame_num=self.mask_num
+                a=initial_params, mask_frame_num=self.mask_num
             )  # , img_c=goal_img
 
             z = torch.randn_like(
