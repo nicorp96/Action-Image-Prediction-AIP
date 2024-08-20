@@ -63,6 +63,7 @@ class DiTTrainerActFrames(TrainerBase):
         self.image_size = self.config["trainer"]["image_size"]
         self.n_epochs = self.config["trainer"]["n_epochs"]
         self.data_path = os.path.join(base, self.config["trainer"]["data_path"])
+        self.val_data_path = os.path.join(base, self.config["trainer"]["val_data_path"])
         self.cuda_num = self.config["trainer"]["cuda_num"]
 
         self.__setup__DDP(self.config["distributed"])
@@ -117,6 +118,11 @@ class DiTTrainerActFrames(TrainerBase):
         self.dataset = RobotDatasetSeqTrj(
             data_path=self.data_path, transform=transform, seq_l=model_config["seq_len"]
         )
+        val_dataset = RobotDatasetSeqTrj(
+            data_path=self.val_data_path,
+            transform=transform,
+            seq_l=model_config["seq_len"],
+        )
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -137,7 +143,7 @@ class DiTTrainerActFrames(TrainerBase):
         )
 
         self.val_loader = (
-            DataLoader(val_dataset, batch_size=32, shuffle=False)
+            DataLoader(val_dataset, batch_size=1, shuffle=False)
             if val_dataset
             else None
         )
@@ -192,7 +198,7 @@ class DiTTrainerActFrames(TrainerBase):
         for epoch in range(self.n_epochs):
             train_loss = self._train_one_epoch(step)
             if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate_one_epoch() if self.val_loader else None
+                val_loss = self._validate_one_epoch(step) if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
@@ -253,18 +259,18 @@ class DiTTrainerActFrames(TrainerBase):
             update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
 
-            if step % self.config["trainer"]["val_num"] == 0:
-                self.save_image_actions(
-                    step=step,
-                    x=x,
-                    next_seq=next_seq,
-                    actions_real=action,
-                    goal_img=goal_img,
-                )
+            # if step % self.config["trainer"]["val_num"] == 0:
+            #     self.save_image_actions(
+            #         step=step,
+            #         x=x,
+            #         next_seq=next_seq,
+            #         actions_real=action,
+            #         goal_img=goal_img,
+            #     )
 
         return running_loss
 
-    def _validate_one_epoch(self):
+    def _validate_one_epoch(self, step):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
@@ -274,6 +280,7 @@ class DiTTrainerActFrames(TrainerBase):
                     next_seq.to(self.device, dtype=torch.float32),
                     action.to(self.device, dtype=torch.float32),
                 )
+
                 b, _, _, _, _ = next_seq.shape
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
@@ -283,27 +290,15 @@ class DiTTrainerActFrames(TrainerBase):
                     .latent_dist.sample()
                     .mul_(0.18215)
                 )
-                model_kwargs = dict(a=action, mask_frame_num=2, img_c=goal_img)
-                z = torch.randn_like(
-                    x,
-                    device=self.device,
+
+                self.save_image_actions(
+                    step=step,
+                    x=x,
+                    next_seq=next_seq,
+                    actions_real=action,
+                    goal_img=goal_img,
                 )
-                z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
-                samples, actions_pred = self.diffusion_s.p_sample_loop(
-                    self.ema,
-                    z.shape,
-                    z,
-                    clip_denoised=False,
-                    progress=True,
-                    model_kwargs=model_kwargs,
-                    device=self.device,
-                )
-                samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
-                samples = self.vae.decode(samples / 0.18215).sample
-                samples = rearrange(
-                    samples, "(b f) c h w -> b f c h w", b=b
-                ).contiguous()
-                batchsize = np.random.choice(b)
+
         return running_loss / len(self.val_loader.dataset)
 
     def _save_checkpoint(self):

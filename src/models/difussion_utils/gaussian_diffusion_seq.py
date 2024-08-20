@@ -1067,6 +1067,9 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
         #     out["act_mean"]
         #     + nonzero_mask_act * torch.exp(0.5 * out["act_log_variance"]) * noise_act
         # )
+        sample[:, : model_kwargs["mask_frame_num"], :, :, :] = x[
+            :, : model_kwargs["mask_frame_num"], :, :, :
+        ]
         return {
             "sample": sample,
             "pred_xstart": out["pred_xstart"],
