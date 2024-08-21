@@ -72,7 +72,7 @@ class DiTActionSeqAct(nn.Module):
                     self.hidden_size,
                     self.num_heads,
                     mlp_ratio=self.mlp_ratio,
-                    attention_mode="causal_linear",
+                    attention_mode="math",
                 )
                 for _ in range(self.depth)
             ]
@@ -240,7 +240,7 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
     def __init__(self, config):
         super().__init__(config)
         self.pos_embed_act = nn.Parameter(
-            torch.zeros(1, 4, self.hidden_size), requires_grad=False
+            torch.zeros(1, 1, self.hidden_size), requires_grad=False
         )
 
         self.temp_embed = nn.Parameter(
@@ -252,9 +252,7 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
         )
         self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
 
-        pos_embed_act = get_2d_sincos_pos_embed(
-            self.pos_embed_act.shape[-1], int(self.seq_len**0.5)
-        )
+        pos_embed_act = get_1d_sincos_temp_embed(self.pos_embed_act.shape[-1], 1)
         self.pos_embed_act.data.copy_(
             torch.from_numpy(pos_embed_act).float().unsqueeze(0)
         )
@@ -262,7 +260,7 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
         self.final_layer_act = FinalLayer(
             self.hidden_size, self.seq_len, self.action_dim
         )
-        self.downsample_layer = nn.Linear(2023, 3)
+        self.downsample_layer = nn.Linear(160, 3)
         # Zero-out output layers:
         nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
@@ -270,7 +268,7 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
         nn.init.constant_(self.final_layer_act.linear.bias, 0)
         nn.init.normal_(self.downsample_layer.weight, std=0.02)
 
-    def forward(self, x, t, a, mask_frame_num=None):
+    def forward(self, x, t, a, init, mask_frame_num=None):
         """
         Forward pass of DiT which now also takes actions as input
         x: (N, L, C, H, W) tensor of video inputs
@@ -280,16 +278,15 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
         batch_sz, l, ch, h, w = x.shape
         x = rearrange(x, "b f c h w -> (b f) c h w")
         x = self.x_embedder(x) + self.pos_embed
-        print(self.a_embedder(a).size())
-        print(self.pos_embed_act.size())
-        a = self.a_embedder(a) + self.pos_embed_act  # (N, D) Action embedding
-        print(x.size())
-        print(a.size())
-        x = torch.cat(x, a, dim=1)
+        init_params = self.a_embedder(init)
+        init_params = repeat(init_params, "b f -> b c f", c=4)
+        init_params = rearrange(init_params, "b (c l) f -> (b c) l f", c=4)
+        init_params = init_params + self.pos_embed_act  # (N, D) Action embedding
+        x = torch.cat((x, init_params), dim=1)
         t = self.t_embedder(t)  # (N, D)
 
-        timestep_spatial = repeat(t, "n d -> (n c) d", c=self.seq_len + 1)
-        timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1]))
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=self.seq_len)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 1))
         # y_feat = img_c.flatten(start_dim=1)
         # y_emb = self.img_c_embedder(y_feat)
         for i in range(0, len(self.blocks), 2):
@@ -303,12 +300,12 @@ class DiTActionFramesSeqJoint(DiTActionSeqAct):
             c = timestep_temp
             x = temp_block(x, c)
             x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
-        c = timestep_spatial + a
-        x_act = self.final_layer_act(x[:, 9:10, :], c)
+        c = timestep_spatial
+        x_act = self.final_layer_act(x[:, 64:, :], c)
         x_act = torch.einsum("nhw->nhw", x_act)
         x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
         x_act = self.downsample_layer(x_act)
-        x = self.final_layer(x, c)
+        x = self.final_layer(x[:, :64, :], c)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
         return x, x_act

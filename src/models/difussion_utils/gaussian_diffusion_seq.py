@@ -1065,10 +1065,9 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         )
 
-        # sample_act = (
-        #     out["act_mean"]
-        #     + nonzero_mask_act * torch.exp(0.5 * out["act_log_variance"]) * noise_act
-        # )
+        sample[:, : model_kwargs["mask_frame_num"], :, :, :] = x[
+            :, : model_kwargs["mask_frame_num"], :, :, :
+        ]
         return {
             "sample": sample,
             "pred_xstart": out["pred_xstart"],
@@ -1218,12 +1217,12 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
             model_kwargs = {}
 
         mask_frame_num = model_kwargs["mask_frame_num"]
-        x_action = model_kwargs["a"]
+        init_param = model_kwargs["init"]
 
         if noise is None:
             # noise = torch.randn_like(x_start)
             unmask_noise = torch.randn_like(x_start[:, mask_frame_num:, :])
-            action_noised = torch.rand_like(x_action)
+            # action_noised = torch.rand_like(x_action)
 
         terms = {}
 
@@ -1234,7 +1233,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
 
         unmask_x_t = self.q_sample(unmask_x_start, t, noise=unmask_noise)
         x_t = torch.cat([mask_x_x_start, unmask_x_t], dim=1)
-        a_t = x_action[:, :]  # self.q_sample(x_action, t, noise=action_noised)
+        # self.q_sample(x_action, t, noise=action_noised)
         # model_kwargs["a"] = a_t
 
         if (
@@ -1282,8 +1281,8 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                     x_t=x_t[:, mask_frame_num:],
                     t=t,
                     clip_denoised=False,
-                    action=model_kwargs["a"],
-                    a_t=a_t,
+                    action=model_kwargs["init"],
+                    a_t=init_param,
                     whitout_action=False,
                 )
 
@@ -1306,7 +1305,7 @@ class GaussianDiffusionSeqAct(GaussianDiffusionSeq):
                 gd.ModelMeanType.EPSILON: unmask_noise,
             }[self.model_mean_type]
 
-            target_act = x_action
+            target_act = model_kwargs["a"]
             assert (
                 model_output[:, mask_frame_num:].shape
                 == target.shape

@@ -4,10 +4,10 @@ trainer:
   image_size: 128
   n_epochs: 6001
   data_path: "data/object_mov.npy"
-  eval_save_real: "results/diffusion_pinn/real/epoch"
-  eval_save_gen: "results/diffusion_pinn/gen/epoch"
-  action_save_gen: "results/diffusion_pinn/gen/action/epoch"
-  action_save_real: "results/diffusion_pinn/real/action/epoch"
+  eval_save_real: "results/diffusion_pinn_joint/real/epoch"
+  eval_save_gen: "results/diffusion_pinn_joint/gen/epoch"
+  action_save_gen: "results/diffusion_pinn_joint/gen/action/epoch"
+  action_save_real: "results/diffusion_pinn_joint/real/action/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
