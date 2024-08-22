@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from src.dataset.data_set_set_pinn import DatasetObjectSeqTrj, DatasetObjectSeqTrjTest
 from src.models.diffusion_trans_pnn import (
     DiTActionFramesSeqJoint,
+    DiTActionFramesSeqJoint6,
 )
 from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
@@ -29,7 +30,7 @@ import copy
 
 def model_factory(model_config):
     model_classes = {
-        "DiTActionFramesSeqJoint": DiTActionFramesSeqJoint,
+        "DiTActionFramesSeqJoint": DiTActionFramesSeqJoint6,
     }
     type = model_config["type"]
     if type not in model_classes:

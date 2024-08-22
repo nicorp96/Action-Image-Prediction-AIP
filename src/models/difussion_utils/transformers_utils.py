@@ -2,7 +2,7 @@ import torch.nn as nn
 from torch import einsum
 import torch
 import torch.nn.functional as F
-from timm.models.vision_transformer import PatchEmbed, Mlp
+from timm.models.vision_transformer import Mlp
 import numpy as np
 
 try:
