@@ -2,8 +2,9 @@ trainer:
   batch_size: 32
   global_seed: 0
   image_size: 64
-  n_epochs: 5
+  n_epochs: 90001
   data_path: "data/multiple_robot_goal"
+  val_data_path: "data/multiple_robot_goal/val"
   eval_save_real: "results/diffusion_seq_frame_act/DiTActionFramesSeq5/real/epoch"
   eval_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq5/gen/epoch"
   action_save_gen: "results/diffusion_seq_frame_act/DiTActionFramesSeq5/gen/action/epoch"
@@ -19,9 +20,9 @@ model:
   input_size: 8
   patch_size: 2
   in_channels: 4
-  hidden_size: 384
-  depth: 4
-  num_heads: 6
+  hidden_size: 768
+  depth: 12
+  num_heads: 12
   mlp_ratio: 4.0
   action_dim: 7
   learn_sigma: false
