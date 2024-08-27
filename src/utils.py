@@ -70,7 +70,7 @@ def unnormilize_action_seq__torch(
     return unnorm_actions
 
 
-class ToTensorVideo:
+class NormalizeVideo:
     def __init__(self):
         pass
 

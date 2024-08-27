@@ -25,13 +25,11 @@ import wandb
 import yaml
 from einops import rearrange
 import os
-from .utils import update_ema, requires_grad
+from .utils import update_ema, requires_grad, NormalizeVideo
 from src.metrics.video_metrics import VideoMetrics
 from diffusers.optimization import get_scheduler
 from diffusers.schedulers import PNDMScheduler
 from .pipelines_video_gen import Trajectory2VideoGenPipeline
-import cv2
-
 
 class DiTTrainerScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
@@ -79,24 +77,24 @@ class DiTTrainerScene(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
+                NormalizeVideo(),
                 # transforms.RandomHorizontalFlip(),
                 transforms.Resize((self.image_size, self.image_size)),
-                # transforms.CenterCrop(self.image_size),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
-            transform=transform,
-            seq_l=model_config["seq_len"],
-        )
-        # self.dataset = BridgeDataset(
-        #     json_dir=self.data_path,
+        # self.dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
         #     transform=transform,
-        #     sequence_length=model_config["seq_len"]
+        #     seq_l=model_config["seq_len"],
         # )
+        self.dataset = BridgeDataset(
+            json_dir=self.data_path,
+            transform=transform,
+            sequence_length=model_config["seq_len"]
+        )
 
         self.sampler = DistributedSampler(
             self.dataset,
@@ -116,7 +114,11 @@ class DiTTrainerScene(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-        self.val_dataset = None
+        self.val_dataset = BridgeDataset(
+            json_dir=self.data_path,
+            transform=transform,
+            sequence_length=model_config["seq_len"]
+        )
         # RobotDatasetSeqScene(
         #     data_path=self.data_path,
         #     transform=transform,
@@ -361,16 +363,16 @@ class DiTTrainerScene(TrainerBase):
         save_image(
             videos,
             self.eval_save_gen_dir + f"_{step}.png",
-            nrow=5,
-            normalize=True,
-            value_range=(-1, 1),
+            nrow=self.config["model"]["seq_len"],
+            normalize=False,
+            #value_range=(-1, 1),
         )
         save_image(
             true_video,
             self.eval_save_real_dir + f"_{step}.png",
-            nrow=5,
-            normalize=True,
-            value_range=(-1, 1),
+            nrow=self.config["model"]["seq_len"],
+            normalize=False,
+            #value_range=(-1, 1),
         )
 
     def _save_checkpoint(self, step):

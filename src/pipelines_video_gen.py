@@ -18,8 +18,6 @@ import urllib.parse as ul
 from typing import Callable, List, Optional, Tuple, Union
 import torch
 import einops
-from transformers import T5EncoderModel, T5Tokenizer
-from torch.utils.data import DataLoader
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import AutoencoderKL, Transformer2DModel
 from diffusers.schedulers import DPMSolverMultistepScheduler
