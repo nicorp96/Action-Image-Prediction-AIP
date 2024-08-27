@@ -68,3 +68,20 @@ def unnormilize_action_seq__torch(
     unnorm_actions = torch.cat((positions, euler_angles, gripper), dim=1)
 
     return unnorm_actions
+
+
+class ToTensorVideo:
+    def __init__(self):
+        pass
+
+    def __call__(self, clip):
+        """
+        Args:
+            clip (torch.tensor, dtype=torch.uint8): Size is (T, C, H, W)
+        Return:
+            clip (torch.tensor, dtype=torch.float): Size is (T, C, H, W)
+        """
+        return clip.float() / 255.0
+
+    def __repr__(self) -> str:
+        return self.__class__.__name__
