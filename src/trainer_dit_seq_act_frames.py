@@ -32,7 +32,7 @@ from src.metrics.video_metrics import VideoMetrics
 import os
 from .utils import update_ema, requires_grad
 from diffusers.schedulers import PNDMScheduler
-from .pipelines_video_gen import Trajectory2VideoGenPipeline
+from .pipelines_video_gen import VideoGenTrajectoryPipeline
 
 
 def model_factory(model_config):
@@ -145,7 +145,7 @@ class DiTTrainerActFrames(TrainerBase):
         )
 
         self.val_loader = (
-            DataLoader(self.val_dataset, batch_size=1, shuffle=False)
+            DataLoader(self.val_dataset, batch_size=32, shuffle=False)
             if self.val_dataset
             else None
         )
@@ -218,29 +218,22 @@ class DiTTrainerActFrames(TrainerBase):
         for epoch in range(self.n_epochs):
             self.sampler.set_epoch(epoch)
             train_loss = self._train_one_epoch(step)
-            print(
-                f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
-                end="",
-            )
             if self.val_loader is not None:
                 if step % self.config["trainer"]["val_num"] == 0:
                     val_loss = self._validate(step)
-                    val_loss = val_loss.clone().detach()
-                    dist.all_reduce(val_loss, op=dist.ReduceOp.SUM)
-                    val_loss = val_loss.item() / dist.get_world_size()
-                    print(f", Validation Loss: {val_loss:.4f}")
                     if val_loss < best_loss:
                         best_loss = val_loss
                         self._save_checkpoint(step)
-                # if step % self.config["trainer"]["val_num_gen"] == 0:
-                # self.validate_video_generation(step)
-            else:
-                print(" ")
-
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.validate_video_generation(step)
+            print(
+                f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
+            )
             step += 1
 
         self.model_ddp.eval()
-        self._save_checkpoint()
+        self._save_checkpoint(step)
+        dist.destroy_process_group()
         print("Training finished.")
 
     def _train_one_epoch(self, step):
@@ -284,21 +277,13 @@ class DiTTrainerActFrames(TrainerBase):
             self.optimizer.zero_grad()
             update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
-            #     self.save_image_actions(
-            #         step=step,
-            #         x=x,
-            #         next_seq=next_seq,
-            #         actions_real=action,
-            #         goal_img=goal_img,
-            #     )
-
         return running_loss
 
     def _validate(self, step):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for goal_img, next_seq, action in tqdm(self.val_loader, desc="Training"):
+            for goal_img, next_seq, action in tqdm(self.val_loader, desc="Validation"):
                 goal_img, next_seq, action = (
                     goal_img.to(device=self.device, dtype=torch.float32),
                     next_seq.to(self.device, dtype=torch.float32),
@@ -322,91 +307,200 @@ class DiTTrainerActFrames(TrainerBase):
                     self.model_ddp, x, t, model_kwargs
                 )
                 loss = loss_dict["loss"].mean()
-                running_loss += loss.item()
-                if step % self.config["trainer"]["val_num_gen"] == 0:
-                    self.save_image_actions(
-                        step=step,
-                        x=x,
-                        next_seq=next_seq,
-                        actions_real=action,
-                        goal_img=goal_img,
-                    )
-
+                running_loss += loss
+        running_loss = running_loss.detach()
+        dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
+        running_loss = running_loss.item() / dist.get_world_size()
+        self.model_ddp.train()
         return running_loss / len(self.val_loader.dataset)
 
-    def _save_checkpoint(self):
-        torch.save(self.model_ddp.state_dict(), "best_model.pth")
+    def _save_checkpoint(self, step):
+        checkpoint = {
+            "model": self.model_ddp.module.state_dict(),
+            "ema": self.ema.state_dict(),
+            "opt": self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, f"checkpoints/frame_action_scene_epoch_{step}.pth")
 
-    def save_image_actions(self, step, x, next_seq, actions_real, goal_img):
-        b, _, _, _, _ = next_seq.shape
+    def validate_video_generation(self, step):
+        batch_id = list(range(0, len(self.val_dataset), int(len(self.val_dataset) / 3)))
+
+        batch_list = [self.val_dataset.__getitem__(id) for id in batch_id]
+        actions = torch.cat(
+            [
+                action.unsqueeze(0)
+                for i, (goal_img, video, action) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        true_video = torch.cat(
+            [
+                video.unsqueeze(0)
+                for i, (goal_img, video, action) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+
+        goal_image = torch.cat(
+            [
+                goal_img.unsqueeze(0)
+                for i, (goal_img, video, action) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+
+        mask_frame_num = self.mask_num
+        mask_x = true_video[:, 0:mask_frame_num]
         with torch.no_grad():
-            # action_n = torch.randn_like(
-            #     actions_real,
-            #     device=self.device,
-            # )
-            model_kwargs = dict(
-                a=actions_real[:, :2, :], mask_frame_num=2, img_c=goal_img
+            b, f, _, _, _ = mask_x.shape
+            mask_x = rearrange(mask_x, "b f c h w -> (b f) c h w").contiguous()
+            mask_x = (
+                self.vae.encode(mask_x)
+                .latent_dist.sample()
+                .mul_(self.vae.config.scaling_factor)
             )
-            z = torch.randn_like(
-                x,
-                device=self.device,
+            mask_x = rearrange(mask_x, "(b f) c h w -> b f c h w", b=b, f=f)
+            goal_image = (
+                self.vae.encode(goal_image[:1, :, :]).latent_dist.sample().mul_(0.18215)
             )
-            z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
-            samples, actions_pred = self.diffusion_s.p_sample_loop(
-                self.ema,
-                z.shape,
-                z,
-                clip_denoised=False,
-                progress=True,
-                model_kwargs=model_kwargs,
-                device=self.device,
-            )
-            samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
-            samples = self.vae.decode(samples / 0.18215).sample
-            samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
-            batchsize = np.random.choice(b)
-            save_image(
-                samples[batchsize, :, :, :, :],
-                self.eval_save_gen_dir + f"_{step}.png",
-                nrow=4,
-                normalize=True,
-                value_range=(-1, 1),
-            )
-            save_image(
-                next_seq[batchsize, :, :, :, :],
-                self.eval_save_real_dir + f"_{step}.png",
-                nrow=4,
-                normalize=True,
-                value_range=(-1, 1),
-            )
-            np.savetxt(
-                self.eval_act_save_gen_dir + f"_{step}.csv",
-                # unnormilize_action_seq__torch(
-                #     actions[batchsize, :, :].detach().cpu().numpy(),
-                #     [self.dataset.max, self.dataset.min],
-                # ),
-                actions_pred[batchsize, :, :].detach().cpu().numpy(),
-                delimiter=",",
-            )
-            np.savetxt(
-                self.eval_act_save_real_dir + f"_{step}.csv",
-                # unnormilize_action_seq__torch(
-                #     action[batchsize, :, :].detach().cpu().numpy(),
-                #     [self.dataset.max, self.dataset.min],
-                # ),
-                actions_real[batchsize, :, :].detach().cpu().numpy(),
-                delimiter=",",
-            )
-            self.log_accuracy(
-                predicted_actions=actions_pred[:batchsize, :, :].detach().cpu().numpy(),
-                real_actions=actions_real[:batchsize, :, :].detach().cpu().numpy(),
-            )
-            avg_psnr, avg_ssim = self.metrics.evaluate_video(
-                samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
-            )
-            if self.config["trainer"]["wandb_log"]:
-                wandb.log({"psnr": avg_psnr})
-                wandb.log({"ssim": avg_ssim})
+        videogen_pipeline = VideoGenTrajectoryPipeline(
+            vae=self.vae, scheduler=self.scheduler, transformer=self.ema
+        )
+        print("Generation total {} videos".format(mask_x.size()[0]))
+        actions = actions[:, :mask_frame_num, :]
+        videos, latents, actions_pred = videogen_pipeline(
+            actions,
+            mask_x=mask_x,
+            goal_image=goal_image,
+            video_length=self.config["model"]["seq_len"],
+            height=self.image_size,
+            width=self.image_size,
+            num_inference_steps=self.config["diffusion"]["infer_num_sampling_steps"],
+            guidance_scale=self.config["diffusion"]["guidance_scale"],  # dumpy
+            device=self.device,
+            output_type="both",
+        )
+        videos = torch.cat(
+            [
+                true_video[
+                    :,
+                    0:mask_frame_num,
+                    :,
+                    :,
+                    :,
+                ],
+                videos[:, mask_frame_num:, :, :, :],
+            ],
+            dim=1,
+        )
+        # videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        true_video = rearrange(true_video, "b f c h w -> (b f) c h w")
+        avg_psnr, avg_ssim = self.metrics.evaluate_video(videos, true_video)
+        print(f"psnr: {avg_psnr}  ssim: {avg_ssim}")
+        if self.config["trainer"]["wandb_log"]:
+            wandb.log({"psnr": avg_psnr})
+            wandb.log({"ssim": avg_ssim})
+        save_image(
+            videos,
+            self.eval_save_gen_dir + f"_{step}.png",
+            nrow=self.config["model"]["seq_len"],
+            normalize=True,
+            value_range=(-1, 1),
+        )
+        save_image(
+            true_video,
+            self.eval_save_real_dir + f"_{step}.png",
+            nrow=self.config["model"]["seq_len"],
+            normalize=True,
+            value_range=(-1, 1),
+        )
+
+        np.savetxt(
+            self.eval_act_save_gen_dir + f"_{step}.csv",
+            actions_pred[0, :, :].detach().cpu().numpy(),
+            delimiter=",",
+        )
+        np.savetxt(
+            self.eval_act_save_real_dir + f"_{step}.csv",
+            actions_pred[0, :, :].detach().cpu().numpy(),
+            delimiter=",",
+        )
+        self.log_accuracy(
+            predicted_actions=actions_pred.detach().cpu().numpy(),
+            real_actions=actions_pred.detach().cpu().numpy(),
+        )
+
+    # def save_image_actions(self, step, x, next_seq, actions_real, goal_img):
+    #     b, _, _, _, _ = next_seq.shape
+    #     with torch.no_grad():
+    #         # action_n = torch.randn_like(
+    #         #     actions_real,
+    #         #     device=self.device,
+    #         # )
+    #         model_kwargs = dict(
+    #             a=actions_real[:, :2, :], mask_frame_num=2, img_c=goal_img
+    #         )
+    #         z = torch.randn_like(
+    #             x,
+    #             device=self.device,
+    #         )
+    #         z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
+    #         samples, actions_pred = self.diffusion_s.p_sample_loop(
+    #             self.ema,
+    #             z.shape,
+    #             z,
+    #             clip_denoised=False,
+    #             progress=True,
+    #             model_kwargs=model_kwargs,
+    #             device=self.device,
+    #         )
+    #         samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
+    #         samples = self.vae.decode(samples / 0.18215).sample
+    #         samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
+    #         batchsize = np.random.choice(b)
+    #         save_image(
+    #             samples[batchsize, :, :, :, :],
+    #             self.eval_save_gen_dir + f"_{step}.png",
+    #             nrow=4,
+    #             normalize=True,
+    #             value_range=(-1, 1),
+    #         )
+    #         save_image(
+    #             next_seq[batchsize, :, :, :, :],
+    #             self.eval_save_real_dir + f"_{step}.png",
+    #             nrow=4,
+    #             normalize=True,
+    #             value_range=(-1, 1),
+    #         )
+    #         np.savetxt(
+    #             self.eval_act_save_gen_dir + f"_{step}.csv",
+    #             # unnormilize_action_seq__torch(
+    #             #     actions[batchsize, :, :].detach().cpu().numpy(),
+    #             #     [self.dataset.max, self.dataset.min],
+    #             # ),
+    #             actions_pred[batchsize, :, :].detach().cpu().numpy(),
+    #             delimiter=",",
+    #         )
+    #         np.savetxt(
+    #             self.eval_act_save_real_dir + f"_{step}.csv",
+    #             # unnormilize_action_seq__torch(
+    #             #     action[batchsize, :, :].detach().cpu().numpy(),
+    #             #     [self.dataset.max, self.dataset.min],
+    #             # ),
+    #             actions_real[batchsize, :, :].detach().cpu().numpy(),
+    #             delimiter=",",
+    #         )
+    #         self.log_accuracy(
+    #             predicted_actions=actions_pred[:batchsize, :, :].detach().cpu().numpy(),
+    #             real_actions=actions_real[:batchsize, :, :].detach().cpu().numpy(),
+    #         )
+    #         avg_psnr, avg_ssim = self.metrics.evaluate_video(
+    #             samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
+    #         )
+    #         if self.config["trainer"]["wandb_log"]:
+    #             wandb.log({"psnr": avg_psnr})
+    #             wandb.log({"ssim": avg_ssim})
 
     def calculate_pose_error(self, predicted_pose, real_pose):
         # Compute the Euclidean distance error for position

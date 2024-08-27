@@ -443,3 +443,379 @@ class Trajectory2VideoGenPipeline(DiffusionPipeline):
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
         # self.save_video(video)
         return video
+
+
+class VideoGenTrajectoryPipeline(DiffusionPipeline):
+    r"""
+    Pipeline for text-to-image generation using PixArt-Alpha.
+
+    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
+    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
+
+    Args:
+        vae ([`AutoencoderKL`]):
+            Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
+        text_encoder ([`T5EncoderModel`]):
+            Frozen text-encoder. PixArt-Alpha uses
+            [T5](https://huggingface.co/docs/transformers/model_doc/t5#transformers.T5EncoderModel), specifically the
+            [t5-v1_1-xxl](https://huggingface.co/PixArt-alpha/PixArt-alpha/tree/main/t5-v1_1-xxl) variant.
+        tokenizer (`T5Tokenizer`):
+            Tokenizer of class
+            [T5Tokenizer](https://huggingface.co/docs/transformers/model_doc/t5#transformers.T5Tokenizer).
+        transformer ([`Transformer2DModel`]):
+            A text conditioned `Transformer2DModel` to denoise the encoded image latents.
+        scheduler ([`SchedulerMixin`]):
+            A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
+    """
+
+    bad_punct_regex = re.compile(
+        r"["
+        + "#®•©™&@·º½¾¿¡§~"
+        + "\)"
+        + "\("
+        + "\]"
+        + "\["
+        + "\}"
+        + "\{"
+        + "\|"
+        + "\\"
+        + "\/"
+        + "\*"
+        + r"]{1,}"
+    )  # noqa
+
+    _optional_components = ["tokenizer", "text_encoder"]
+    model_cpu_offload_seq = "text_encoder->transformer->vae"
+
+    def __init__(
+        self,
+        vae: AutoencoderKL,
+        transformer: Transformer2DModel,
+        scheduler: DPMSolverMultistepScheduler,
+    ):
+        super().__init__()
+
+        self.register_modules(vae=vae, transformer=transformer, scheduler=scheduler)
+
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
+    def prepare_extra_step_kwargs(self, generator, eta):
+        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
+        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
+        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
+        # and should be between [0, 1]
+
+        accepts_eta = "eta" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        extra_step_kwargs = {}
+        if accepts_eta:
+            extra_step_kwargs["eta"] = eta
+
+        # check if the scheduler accepts generator
+        accepts_generator = "generator" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
+        if accepts_generator:
+            extra_step_kwargs["generator"] = generator
+        return extra_step_kwargs
+
+    def prepare_latents(
+        self,
+        mask_x,
+        batch_size,
+        num_channels_latents,
+        video_length,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+    ):
+        if num_channels_latents == 3:
+            shape = (batch_size, video_length, num_channels_latents, height, width)
+        else:
+            shape = (
+                batch_size,
+                video_length,
+                num_channels_latents,
+                height // self.vae_scale_factor,
+                width // self.vae_scale_factor,
+            )
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        if latents is None:
+            latents = randn_tensor(
+                shape, generator=generator, device=device, dtype=dtype
+            )
+        else:
+            latents = latents.to(device)
+        latents = torch.cat([mask_x, latents[:, mask_x.size()[1] :]], dim=1)
+        # scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
+        return latents
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        action,
+        mask_x,
+        goal_image,
+        num_inference_steps: int = 20,
+        timesteps: List[int] = None,
+        guidance_scale: float = 4.5,
+        num_images_per_prompt: Optional[int] = 1,
+        video_length: Optional[int] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+        # clean_caption: bool = True,
+        # mask_feature: bool = True,
+        enable_vae_temporal_decoder: bool = False,
+        device=None,
+    ) -> Union[VideoPipelineOutput, Tuple]:
+        """
+        Function invoked when calling the pipeline for generation.
+
+        Args:
+            prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+                instead.
+            negative_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
+                less than `1`).
+            num_inference_steps (`int`, *optional*, defaults to 100):
+                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                expense of slower inference.
+            timesteps (`List[int]`, *optional*):
+                Custom timesteps to use for the denoising process. If not defined, equal spaced `num_inference_steps`
+                timesteps are used. Must be in descending order.
+            guidance_scale (`float`, *optional*, defaults to 7.0):
+                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
+                `guidance_scale` is defined as `w` of equation 2. of [Imagen
+                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
+                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
+                usually at the expense of lower image quality.
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                The number of images to generate per prompt.
+            height (`int`, *optional*, defaults to self.unet.config.sample_size):
+                The height in pixels of the generated image.
+            width (`int`, *optional*, defaults to self.unet.config.sample_size):
+                The width in pixels of the generated image.
+            eta (`float`, *optional*, defaults to 0.0):
+                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
+                [`schedulers.DDIMScheduler`], will be ignored for others.
+            generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
+            latents (`torch.FloatTensor`, *optional*):
+                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
+                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
+                tensor will ge generated by sampling using the supplied random `generator`.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. For PixArt-Alpha this negative prompt should be "". If not
+                provided, negative_prompt_embeds will be generated from `negative_prompt` input argument.
+            output_type (`str`, *optional*, defaults to `"pil"`):
+                The output format of the generate image. Choose between
+                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~pipelines.stable_diffusion.IFPipelineOutput`] instead of a plain tuple.
+            callback (`Callable`, *optional*):
+                A function that will be called every `callback_steps` steps during inference. The function will be
+                called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+            callback_steps (`int`, *optional*, defaults to 1):
+                The frequency at which the `callback` function will be called. If not specified, the callback will be
+                called at every step.
+            clean_caption (`bool`, *optional*, defaults to `True`):
+                Whether or not to clean the caption before creating embeddings. Requires `beautifulsoup4` and `ftfy` to
+                be installed. If the dependencies are not installed, the embeddings will be created from the raw
+                prompt.
+            mask_feature (`bool` defaults to `True`): If set to `True`, the text embeddings will be masked.
+
+        Examples:
+
+        Returns:
+            [`~pipelines.ImagePipelineOutput`] or `tuple`:
+                If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
+                returned where the first element is a list with the generated images
+        """
+        # 1. Check inputs. Raise error if not correct
+        height = height or self.transformer.config.sample_size * self.vae_scale_factor
+        width = width or self.transformer.config.sample_size * self.vae_scale_factor
+        batch_size = mask_x.size()[0]
+        do_classifier_free_guidance = guidance_scale > 1.0
+        # 4. Prepare timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        # 5. Prepare latents.
+        try:
+            latent_channels = self.transformer.in_channels
+        except:
+            latent_channels = self.transformer.channels
+        latents = self.prepare_latents(
+            mask_x,
+            batch_size * num_images_per_prompt,
+            latent_channels,
+            video_length,
+            height,
+            width,
+            mask_x.dtype,  # prompt_embeds.dtype,
+            device,
+            generator,
+            latents,
+        )
+
+        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # 7. Denoising loop
+        num_warmup_steps = max(
+            len(timesteps) - num_inference_steps * self.scheduler.order, 0
+        )
+
+        # action = torch.cat([action,torch.zeros_like(action)],dim=0) if do_classifier_free_guidance else action
+
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                latent_model_input = (
+                    torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                )
+                # latent_model_input = latents
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
+
+                current_timestep = t
+                if not torch.is_tensor(current_timestep):
+                    # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+                    # This would be a good case for the `match` statement (Python 3.10+)
+                    # is_mps = latent_model_input.device.type == "mps"
+                    # if isinstance(current_timestep, float):
+                    #     dtype = torch.float32 if is_mps else torch.float64
+                    # else:
+                    #     dtype = torch.int32 if is_mps else torch.int64
+                    current_timestep = torch.tensor(
+                        [current_timestep],
+                        dtype=latent_model_input.dtype,
+                        device=latent_model_input.device,
+                    )
+                elif len(current_timestep.shape) == 0:
+                    current_timestep = current_timestep[None].to(
+                        latent_model_input.device
+                    )
+                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                current_timestep = current_timestep.expand(latent_model_input.shape[0])
+                # predict noise model_output
+                noise_pred, act_pred = self.transformer(
+                    latent_model_input,
+                    # encoder_hidden_states=prompt_embeds,
+                    a=action,
+                    t=current_timestep,
+                    img_c=goal_image,
+                    mask_frame_num=mask_x.size()[1],
+                    # use_fp16=latent_model_input.dtype == torch.float16,
+                    # added_cond_kwargs=added_cond_kwargs,
+                )  # [0]
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
+
+                # learned sigma
+                # if self.transformer.config.out_channels // 2 == latent_channels:
+                if noise_pred.size()[2] // 2 == latent_channels:
+                    noise_pred = noise_pred.chunk(2, dim=2)[0]
+                else:
+                    noise_pred = noise_pred
+
+                # compute previous image: x_t -> x_t-1
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
+                latents = torch.cat([mask_x, latents[:, mask_x.size()[1] :]], dim=1)
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+        # from utils import show_latents
+        videos = None
+        if output_type == "both":
+            videos = self.decode_latents(latents)
+        elif output_type == "video":
+            videos = latents
+            latents = None
+
+        # Offload all models
+        self.maybe_free_model_hooks()
+        return videos, latents, act_pred
+
+    def decode_latents(self, latents):
+        video_length = latents.shape[1]
+        latents = latents / self.vae.config.scaling_factor
+        latents = einops.rearrange(latents, "b f c h w -> (b f) c h w")
+        video = []
+        for frame_idx in range(latents.shape[0]):
+            video.append(self.vae.decode(latents[frame_idx : frame_idx + 1]).sample)
+        video = torch.cat(video)
+        video = einops.rearrange(video, "(b f) c h w -> b f c h w", f=video_length)
+        # video = ((video / 2.0 + 0.5).clamp(0, 1) * 255).to(dtype=torch.uint8).cpu().contiguous()
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        return video
+
+    def decode_latents_with_temporal_decoder(self, latents):
+        latents = einops.rearrange(latents, "b f c h w -> b c f h w")
+        # video_length = latents.shape[2]
+        latents = 1 / self.vae.config.scaling_factor * latents
+        latents = einops.rearrange(latents, "b c f h w -> (b f) c h w")
+
+        # latents = torch.rand_like(latents)
+        video = []
+
+        decode_chunk_size = 8
+        for frame_idx in range(0, latents.shape[0], decode_chunk_size):
+            num_frames_in = latents[frame_idx : frame_idx + decode_chunk_size].shape[0]
+
+            decode_kwargs = {}
+            decode_kwargs["num_frames"] = num_frames_in
+
+            video.append(
+                self.vae.decode(
+                    latents[frame_idx : frame_idx + decode_chunk_size], **decode_kwargs
+                ).sample
+            )
+
+        video = torch.cat(video)
+        video = einops.rearrange(video, "(b f) c h w -> b f h w c", f=num_frames_in)
+        video = (
+            ((video / 2.0 + 0.5).clamp(0, 1) * 255)
+            .to(dtype=torch.uint8)
+            .cpu()
+            .contiguous()
+        )
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # self.save_video(video)
+        return video
