@@ -27,7 +27,7 @@ from einops import rearrange
 import os
 from .utils import update_ema, requires_grad
 from src.metrics.video_metrics import VideoMetrics
-
+from diffusers.optimization import get_scheduler
 
 class DiTTrainerScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
@@ -83,18 +83,18 @@ class DiTTrainerScene(TrainerBase):
         )
 
         # Load dataset
-        # self.dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
-        #     transform=transform,
-        #     seq_l=model_config["seq_len"],
-        # )
-        self.dataset = BridgeDataset(
-            json_dir=self.data_path,
+        self.dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
             transform=transform,
-            sequence_length=model_config["seq_len"]
+            seq_l=model_config["seq_len"],
         )
+        # self.dataset = BridgeDataset(
+        #     json_dir=self.data_path,
+        #     transform=transform,
+        #     sequence_length=model_config["seq_len"]
+        # )
         
-        sampler = DistributedSampler(
+        self.sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
             rank=self.rank,
@@ -106,7 +106,7 @@ class DiTTrainerScene(TrainerBase):
             self.dataset,
             batch_size=int(self.batch_size // dist.get_world_size()),
             shuffle=False,
-            sampler=sampler,
+            sampler=self.sampler,
             num_workers=4,
             pin_memory=True,
             drop_last=True,
@@ -124,6 +124,12 @@ class DiTTrainerScene(TrainerBase):
             self.model_ddp.parameters(),
             lr=self.config["trainer"]["learning_rate"],
             weight_decay=self.config["trainer"]["weight_decay"],
+        )
+        self.lr_scheduler = get_scheduler(
+        name="constant",
+        optimizer=self.optimizer,
+        num_warmup_steps=self.config["trainer"]["lr_warmup_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
+        num_training_steps=self.config["trainer"]["max_train_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
         )
 
     def __load_config__(self):
@@ -162,9 +168,8 @@ class DiTTrainerScene(TrainerBase):
         step = 0
         val_loss = None
         for epoch in range(self.n_epochs):
-            train_loss = self._train_one_epoch(step)
-            if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate_one_epoch() if self.val_loader else None
+            self.sampler.set_epoch(epoch)
+            train_loss, val_loss = self._train_one_epoch(step)
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
@@ -175,8 +180,7 @@ class DiTTrainerScene(TrainerBase):
                     best_loss = val_loss
                     self._save_checkpoint()
             else:
-                print(" ")
-
+                print("")
             step += 1
 
         self.model_ddp.eval()
@@ -186,7 +190,7 @@ class DiTTrainerScene(TrainerBase):
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for next_seq, action in tqdm(self.data_loader, desc="Training"):
+        for step ,(next_seq, action) in enumerate(tqdm(self.data_loader, desc="Training")):
             next_seq, action = (
                 next_seq.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
@@ -197,7 +201,7 @@ class DiTTrainerScene(TrainerBase):
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
-
+            
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
@@ -211,70 +215,88 @@ class DiTTrainerScene(TrainerBase):
                 wandb.log({"loss": loss})
             self.optimizer.zero_grad()
             loss.backward()
+            # if train_steps < args.start_clip_iter: # if train_steps >= start_clip_iter, will clip gradient
+            #     gradient_norm = clip_grad_norm_(model.module.parameters(), args.clip_max_norm, clip_grad=False)
+            # else:
+            #     gradient_norm = clip_grad_norm_(model.module.parameters(), args.clip_max_norm, clip_grad=True)
             self.optimizer.step()
+            self.lr_scheduler
+            self.optimizer.zero_grad()
             update_ema(self.ema, self.model_ddp.module)
+            
             running_loss += loss.item()
 
             if step % self.config["trainer"]["val_num"] == 0:
-                with torch.no_grad():
-                    model_kwargs = dict(a=action[:1,:,:], mask_frame_num=2)
+                val_loss = self._validate()
+                val_loss = val_loss.clone().detach()
+                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
+                avg_loss = avg_loss.item() / dist.get_world_size()
+                # with torch.no_grad():
+                #     model_kwargs = dict(a=action[:1,:,:], mask_frame_num=2)
                     
-                    z = torch.randn_like(
-                        x[:1, :, :, :],
-                        device=self.device,
-                    )
-                    z[:1, :2, :, :] = x[:1, :2, :, :]
-                    samples = self.diffusion_s.p_sample_loop(
-                        self.ema,
-                        z.shape,
-                        z,
-                        clip_denoised=False,
-                        progress=True,
-                        model_kwargs=model_kwargs,
-                        device=self.device,
-                    )
-                    samples = rearrange(
-                        samples, "b f c h w -> (b f) c h w"
-                    ).contiguous()
+                #     z = torch.randn_like(
+                #         x[:1, :, :, :],
+                #         device=self.device,
+                #     )
+                #     z[:1, :2, :, :] = x[:1, :2, :, :]
+                #     samples = self.diffusion_s.p_sample_loop(
+                #         self.ema,
+                #         z.shape,
+                #         z,
+                #         clip_denoised=False,
+                #         progress=True,
+                #         model_kwargs=model_kwargs,
+                #         device=self.device,
+                #     )
+                #     samples = rearrange(
+                #         samples, "b f c h w -> (b f) c h w"
+                #     ).contiguous()
 
-                    samples = self.vae.decode(samples / 0.18215).sample
-                    samples = rearrange(
-                        samples, "(b f) c h w -> b f c h w", b=1
-                    ).contiguous()
+                #     samples = self.vae.decode(samples / 0.18215).sample
+                #     samples = rearrange(
+                #         samples, "(b f) c h w -> b f c h w", b=1
+                #     ).contiguous()
                     
-                    batchsize = np.random.choice(1)
+                #     batchsize = np.random.choice(1)
 
-                    save_image(
-                        samples[batchsize, :, :, :, :],
-                        self.eval_save_gen_dir + f"_{step}.png",
-                        nrow=5,
-                        normalize=False,
-                        #value_range=(0, 1),
-                    )
-                    save_image(
-                        next_seq[batchsize,:,:,:,:],
-                        self.eval_save_real_dir + f"_{step}.png",
-                        nrow=5,
-                        normalize=True,
-                        #value_range=(-1, 1),
-                    )
-                self._save_checkpoint(step)
+                #     save_image(
+                #         samples[batchsize, :, :, :, :],
+                #         self.eval_save_gen_dir + f"_{step}.png",
+                #         nrow=5,
+                #         normalize=False,
+                #         #value_range=(0, 1),
+                #     )
+                #     save_image(
+                #         next_seq[batchsize,:,:,:,:],
+                #         self.eval_save_real_dir + f"_{step}.png",
+                #         nrow=5,
+                #         normalize=True,
+                #         #value_range=(-1, 1),
+                #     )
+        return running_loss, val_loss
 
-        return running_loss
-
-    def _validate_one_epoch(self):
+    def _validate(self):
         self.model.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for images, actions, timesteps in tqdm(self.val_loader, desc="Validation"):
-                images, actions, timesteps = (
-                    images.to(self.device),
-                    actions.to(self.device),
-                    timesteps.to(self.device),
+            for next_seq, action in tqdm(self.val_loader, desc="Validation"):
+                next_seq, action = (
+                next_seq.to(self.device, dtype=torch.float32),
+                action.to(self.device, dtype=torch.float32),
                 )
-                outputs = self.model(images, timesteps, actions)
-                loss = self.criterion(outputs, images)
-                running_loss += loss.item() * images.size(0)
+                b, _, _, _, _ = next_seq.shape
+                x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
+                x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
+                x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
+                t = torch.randint(
+                0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                )
+                model_kwargs = dict(a=action, mask_frame_num=2)
+                loss_dict = self.diffusion_s.training_losses(
+                self.model_ddp, x, t, model_kwargs
+                )
+                loss = loss_dict["loss"].mean()
+                running_loss += loss.item()
         return running_loss / len(self.val_loader.dataset)
 
     def _save_checkpoint(self,step):
