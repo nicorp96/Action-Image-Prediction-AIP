@@ -103,7 +103,8 @@ class DataProcessor:
 
     def calculate_normals(self, img):
         # Convert RGB to Grayscale
-        image = np.transpose(img, (1, 2, 0))
+        img_8u = cv2.convertScaleAbs(img)
+        image = np.transpose(img_8u, (1, 2, 0))
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Compute gradients along the x and y axis

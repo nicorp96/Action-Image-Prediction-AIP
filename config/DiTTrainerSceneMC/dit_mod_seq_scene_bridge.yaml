@@ -1,11 +1,11 @@
 trainer:
-  batch_size: 32
+  batch_size: 64
   global_seed: 0
-  image_size: 64
+  image_size: 256
   n_epochs: 150001
-  data_path: "data/dynamic_scene"
-  eval_save_real: "results/diffusion_seq_scene/without_xarm/real/epoch"
-  eval_save_gen: "results/diffusion_seq_scene/without_xarm/gen/epoch"
+  data_path: "ds_bridge/training/annotation"
+  eval_save_real: "results/Bridge/DiTTrainerSceneMC/real/epoch"
+  eval_save_gen: "results/Bridge/DiTTrainerSceneMC/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
@@ -14,7 +14,7 @@ trainer:
 
 model:
   type: "DiT"
-  input_size: 8
+  input_size: 32
   patch_size: 2
   in_channels: 4
   hidden_size: 768

@@ -302,7 +302,7 @@ class GaussianDiffusionSeq:
         sample = (
             out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         )
-        sample[:, :2, :, :, :] = x[:, :2, :, :, :]
+        sample[:, :model_kwargs["mask_frame_num"], :, :, :] = x[:, :model_kwargs["mask_frame_num"], :, :, :]
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
 
     def p_sample_loop(

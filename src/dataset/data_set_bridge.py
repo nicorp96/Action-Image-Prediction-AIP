@@ -7,7 +7,7 @@ import numpy as np
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from .utils_ds import DataProcessor
-
+import random
 
 class BridgeDataset(data.Dataset):
 
@@ -22,6 +22,7 @@ class BridgeDataset(data.Dataset):
         self.json_dir = json_dir
         self.transform = transform
         self.file = []
+        self.base =os.path.join(os.getcwd(), "ds_bridge/training")
         self.data = self._load_data()
         self.sequence_length = sequence_length
 
@@ -33,7 +34,8 @@ class BridgeDataset(data.Dataset):
                 self.file.append(file_path)
                 with open(file_path, "r") as f:
                     sample = json.load(f)
-                    data.append(sample)
+                    if os.path.exists(os.path.join(self.base, sample["videos"][0]["video_path"])):
+                        data.append(sample)
         return data
 
     def _extract_video_frames(
@@ -41,10 +43,10 @@ class BridgeDataset(data.Dataset):
         video_path,
     ):
         # Open the video file
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(os.path.join(self.base,video_path))
 
         if not cap.isOpened():
-            raise ValueError(f"Error: Cannot open video file at {video_path}")
+            raise ValueError(f"Error: Cannot open video file at {os.path.join(self.base,video_path)}")
         frames = []
         while cap.isOpened():
             ret, frame = cap.read()
@@ -58,19 +60,25 @@ class BridgeDataset(data.Dataset):
     def __len__(self):
         return len(self.data)
 
-    def _get_sequence(self, data, start_index):
-        sequence = data[start_index : start_index + self.sequence_length]
-        if len(sequence) < self.sequence_length:
-            # Pad the sequence if it's shorter than the required length
-            padding = np.zeros(
-                (self.sequence_length - len(sequence), *sequence.shape[1:])
-            )
-            sequence = np.concatenate((sequence, padding), axis=0)
+    def _get_sequence_action(self, data, start_index):
+        dim = data[0].shape[0]
+        sequence = np.zeros((self.sequence_length, int(dim)))
+        sequence[0, :] = data[0]
+        sequence[(self.sequence_length - 1), :] = data[-1]
+        sequence[1 : (self.sequence_length - 1), :] = data[start_index]
+        return sequence
+
+    def _get_sequence_video(self, data, start_index):
+        h, w, c = data[0].shape
+        sequence = np.zeros((self.sequence_length, h, w, c))
+        sequence[0, :, :, :] = data[0]
+        sequence[(self.sequence_length - 1), :, :, :] = data[-1]
+        sequence[1 : (self.sequence_length - 1), :, :, :] = data[start_index]
         return sequence
 
     def __getitem__(self, idx):
         sample = self.data[idx]
-        text = sample["texts"][0]  # Assuming one text per sample
+        #text = sample["texts"][0]  # Assuming one text per sample
         video_path = sample["videos"][0]["video_path"]
         video_frames = self._extract_video_frames(video_path)
         video_length = len(video_frames)
@@ -79,18 +87,20 @@ class BridgeDataset(data.Dataset):
         action_length = len(actions)
 
         # Ensure the sequence length is valid
-        max_start_index = min(video_length, action_length) - self.sequence_length
+        max_start_index = min(video_length, action_length) #- self.sequence_length
         if max_start_index < 0:
             raise ValueError(
                 f"Sequence length {self.sequence_length} is too long for sample {self.file[idx]}"
             )
-
-        start_index = np.random.randint(0, max_start_index + 1)
+            
+        random_indices = sorted(
+            random.sample(range(1, (max_start_index - 1)), (self.sequence_length - 2))
+        )
 
         # Get sequences
-        video_sequence = self._get_sequence(video_frames, start_index)
+        video_sequence = self._get_sequence_video(video_frames, random_indices)
         # state_sequence = self._get_sequence(states, start_index)
-        actions_sequence = self._get_sequence(actions, start_index)
+        actions_sequence = self._get_sequence_action(actions, random_indices)
 
         # Apply transforms if any
         if self.transform:
@@ -99,7 +109,6 @@ class BridgeDataset(data.Dataset):
         video_sequence = torch.stack(video_sequence)
         # state_sequence = torch.tensor(state_sequence, dtype=torch.float32)
         actions_sequence = torch.tensor(actions_sequence, dtype=torch.float32)
-
         return video_sequence, actions_sequence
 
 
@@ -108,10 +117,10 @@ class BridgeDatasetMC(BridgeDataset):
     def __init__(self, json_dir, transform=None, sequence_length=10):
         super().__init__(json_dir, transform, sequence_length)
         self.data_proc = DataProcessor()
-
+        
     def __getitem__(self, idx):
         sample = self.data[idx]
-        text = sample["texts"][0]  # Assuming one text per sample
+        #text = sample["texts"][0]  # Assuming one text per sample
         video_path = sample["videos"][0]["video_path"]
         video_frames = self._extract_video_frames(video_path)
         video_length = len(video_frames)
@@ -119,42 +128,44 @@ class BridgeDatasetMC(BridgeDataset):
         # states = np.array(sample["state"])
         action_length = len(actions)
 
-        # Ensure the sequence length is valid
-        max_start_index = min(video_length, action_length) - self.sequence_length
+        max_start_index = min(video_length, action_length) #- self.sequence_length
         if max_start_index < 0:
             raise ValueError(
                 f"Sequence length {self.sequence_length} is too long for sample {self.file[idx]}"
             )
-
-        start_index = np.random.randint(0, max_start_index + 1)
+            
+        random_indices = sorted(
+            random.sample(range(1, (max_start_index - 1)), (self.sequence_length - 2))
+        )
 
         # Get sequences
-        video_sequence = self._get_sequence(video_frames, start_index)
+        video_sequence = self._get_sequence_video(video_frames, random_indices)
         # state_sequence = self._get_sequence(states, start_index)
-        actions_sequence = self._get_sequence(actions, start_index)
+        actions_sequence = self._get_sequence_action(actions, random_indices)
 
         # Apply transforms if any
         if self.transform:
             video_sequence = [self.transform(video_i) for video_i in video_sequence]
-
-        nomrals_v = torch.stack(
+        
+        normals_v = torch.stack(
             [
                 self.data_proc.calculate_normals(img.detach().cpu().numpy())
                 for img in video_sequence
             ]
         )
-        video_sequence = torch.stack(video_sequence).to(dtype=torch.float32)
+        video_sequence = torch.stack(video_sequence)
         # state_sequence = torch.tensor(state_sequence, dtype=torch.float32)
         actions_sequence = torch.tensor(actions_sequence, dtype=torch.float32)
-
-        return video_sequence, nomrals_v, actions_sequence
+        first_frame = video_sequence[0]
+        
+        return first_frame, video_sequence, actions_sequence, normals_v
 
 
 if __name__ == "__main__":
     custom_transform = transforms.Compose(
         [
             transforms.ToTensor(),  # Convert video frames to tensor
-            transforms.Resize((256, 256)),  # Resize to (H, W)
+            transforms.Resize((128, 128)),  # Resize to (H, W)
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             # transforms.Normalize(
             #     mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -162,37 +173,37 @@ if __name__ == "__main__":
         ]
     )
     # Usage
-    dataset = BridgeDataset(
-        json_dir="/home/nrodriguez/Documents/DataSetRobotic/annotation",
+    dataset = BridgeDatasetMC(
+        json_dir="/home/snoopy/Nicolas/Action-Image-Prediction-AIP/ds_bridge/training/annotation",
         sequence_length=10,
         transform=custom_transform,
     )
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=4,
+        batch_size=10,
         shuffle=True,
         drop_last=True,
     )
 
     # Iterate over data
-    for step, (video_sequences, nomrals_v, actions_sequences) in enumerate(dataloader):
-        print(video_sequences.shape)  # Should be [batch_size, sequence_length, H, W, C]
+    for step, (first_frame, video_sequence, actions_sequence, normals_v) in enumerate(dataloader):
+        print(video_sequence.shape)  # Should be [batch_size, sequence_length, H, W, C]
         # print(
         #     state_sequences.shape
         # )  # Should be [batch_size, sequence_length, num_features]
         image_path = os.path.join(
-            "/home/nrodriguez/Documents/DataSetRobotic/w/",
+            "/home/snoopy/Nicolas/Action-Image-Prediction-AIP/w/",
             f"img_{step}.png",
         )
         vutils.save_image(
-            nomrals_v.view(
+            video_sequence.view(
                 -1,
-                nomrals_v.size(-3),
-                nomrals_v.size(-2),
-                nomrals_v.size(-1),
+                video_sequence.size(-3),
+                video_sequence.size(-2),
+                video_sequence.size(-1),
             ),
             image_path,
             normalize=True,
             nrow=10,
         )
-        print(actions_sequences.size())
+        print(actions_sequence.size())

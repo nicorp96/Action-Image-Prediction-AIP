@@ -6,6 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
+from src.dataset.data_set_bridge import BridgeDataset
 from src.models.diffusion_frame_pred import (
     DiTActionSeqISim,
     DiTActionSeqFrameAtt,
@@ -45,7 +46,7 @@ class DiTTrainerScene(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionSeqFrameAtt(model_config)
+        self.model_dit = DiTActionSeqISim(model_config)
 
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
@@ -70,23 +71,29 @@ class DiTTrainerScene(TrainerBase):
         self.vae = AutoencoderKL.from_pretrained(
             vae_config["path"], subfolder=vae_config["subfolder"]
         ).to(self.device)
-
+        # self.vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(self.device)
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
                 # transforms.RandomHorizontalFlip(),
-                transforms.Resize(self.image_size),
-                transforms.CenterCrop(self.image_size),
+                transforms.Resize((self.image_size, self.image_size)),
+                #transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
+        # self.dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
+        #     transform=transform,
+        #     seq_l=model_config["seq_len"],
+        # )
+        self.dataset = BridgeDataset(
+            json_dir=self.data_path,
             transform=transform,
-            seq_l=model_config["seq_len"],
+            sequence_length=model_config["seq_len"]
         )
+        
         sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -100,7 +107,7 @@ class DiTTrainerScene(TrainerBase):
             batch_size=int(self.batch_size // dist.get_world_size()),
             shuffle=False,
             sampler=sampler,
-            num_workers=2,
+            num_workers=4,
             pin_memory=True,
             drop_last=True,
             # collate_fn=collate_fn,
@@ -136,9 +143,7 @@ class DiTTrainerScene(TrainerBase):
             self.batch_size % dist.get_world_size() == 0
         ), f"Batch size must be divisible by the world size."
         self.rank = dist.get_rank()
-        self.device = torch.device(
-            self.cuda_num
-        )  # self.rank % torch.cuda.device_count()
+        self.device = torch.device(self.rank % torch.cuda.device_count())
         self.seed = self.global_seed * dist.get_world_size() + self.rank
         torch.manual_seed(self.seed)
         torch.cuda.set_device(self.device)
@@ -181,9 +186,8 @@ class DiTTrainerScene(TrainerBase):
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for current_img, next_seq, action in tqdm(self.data_loader, desc="Training"):
-            current_img, next_seq, action = (
-                current_img.to(device=self.device, dtype=torch.float32),
+        for next_seq, action in tqdm(self.data_loader, desc="Training"):
+            next_seq, action = (
                 next_seq.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
             )
@@ -213,12 +217,13 @@ class DiTTrainerScene(TrainerBase):
 
             if step % self.config["trainer"]["val_num"] == 0:
                 with torch.no_grad():
-                    model_kwargs = dict(a=action, mask_frame_num=2)
+                    model_kwargs = dict(a=action[:1,:,:], mask_frame_num=2)
+                    
                     z = torch.randn_like(
-                        x,
+                        x[:1, :, :, :],
                         device=self.device,
                     )
-                    z[:, :2, :, :] = x[:, :2, :, :]
+                    z[:1, :2, :, :] = x[:1, :2, :, :]
                     samples = self.diffusion_s.p_sample_loop(
                         self.ema,
                         z.shape,
@@ -231,25 +236,29 @@ class DiTTrainerScene(TrainerBase):
                     samples = rearrange(
                         samples, "b f c h w -> (b f) c h w"
                     ).contiguous()
+
                     samples = self.vae.decode(samples / 0.18215).sample
                     samples = rearrange(
-                        samples, "(b f) c h w -> b f c h w", b=b
+                        samples, "(b f) c h w -> b f c h w", b=1
                     ).contiguous()
-                    batchsize = np.random.choice(b)
+                    
+                    batchsize = np.random.choice(1)
+
                     save_image(
                         samples[batchsize, :, :, :, :],
                         self.eval_save_gen_dir + f"_{step}.png",
                         nrow=5,
-                        normalize=True,
-                        value_range=(-1, 1),
+                        normalize=False,
+                        #value_range=(0, 1),
                     )
                     save_image(
-                        next_seq[batchsize, :, :, :, :],
+                        next_seq[batchsize,:,:,:,:],
                         self.eval_save_real_dir + f"_{step}.png",
                         nrow=5,
                         normalize=True,
-                        value_range=(-1, 1),
+                        #value_range=(-1, 1),
                     )
+                self._save_checkpoint(step)
 
         return running_loss
 
@@ -268,8 +277,8 @@ class DiTTrainerScene(TrainerBase):
                 running_loss += loss.item() * images.size(0)
         return running_loss / len(self.val_loader.dataset)
 
-    def _save_checkpoint(self):
-        torch.save(self.model_ddp.state_dict(), "best_model.pth")
+    def _save_checkpoint(self,step):
+        torch.save(self.model_ddp.state_dict(), f"checkpoints/scene_bridge_epoch_{step}.pth")
 
     def save_image_actions(self, step, x, next_seq, actions_real):
         model_kwargs = dict(a=actions_real, mask_frame_num=2)
@@ -296,8 +305,8 @@ class DiTTrainerScene(TrainerBase):
             samples[batchsize, :, :, :, :],
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=5,
-            normalize=True,
-            value_range=(-1, 1),
+            normalize=False,
+            #value_range=(-1, 1),
         )
         save_image(
             next_seq[batchsize, :, :, :, :],

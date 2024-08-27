@@ -24,7 +24,7 @@ for config_file in "${yaml_files[@]}"; do
     # Extract the base name of the file (without path)
     config_filename=$(basename "$config_file")
     echo "Processing $config_file..."
-    torchrun --nproc_per_node=2 --nnodes=1 --node_rank=0 --master_addr="localhost" --master_port=12355 run_training_diff.py -c "$config_file" -t "$DEFAULT_TRAINER"
+    torchrun --nproc_per_node=4 --nnodes=1 --node_rank=0 --master_addr="localhost" --master_port=12355 run_training_diff.py -c "$config_file" -t "$DEFAULT_TRAINER"
 done
 
 echo "Finished Training"

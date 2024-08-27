@@ -158,3 +158,5 @@ data
 *.pth
 *.npz
 /w
+*env-img/
+*ds_bridge/

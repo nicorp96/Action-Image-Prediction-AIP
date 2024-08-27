@@ -1,20 +1,20 @@
 trainer:
-  batch_size: 32
+  batch_size: 64
   global_seed: 0
-  image_size: 64
+  image_size: 128
   n_epochs: 150001
-  data_path: "data/dynamic_scene"
-  eval_save_real: "results/diffusion_seq_scene/without_xarm/real/epoch"
-  eval_save_gen: "results/diffusion_seq_scene/without_xarm/gen/epoch"
+  data_path: "ds_bridge/training/annotation"
+  eval_save_real: "results/Bridge/DiTTrainerScene/real/epoch"
+  eval_save_gen: "results/Bridge/DiTTrainerScene/gen/epoch"
   learning_rate: 0.0001
   weight_decay: 0
   cuda_num: 0
   wandb_log: false
-  val_num: 5000
+  val_num: 1000
 
 model:
   type: "DiT"
-  input_size: 8
+  input_size: 16
   patch_size: 2
   in_channels: 4
   hidden_size: 768
@@ -27,7 +27,7 @@ model:
   mask_n: 2
 
 diffusion:
-  timestep_respacing: ""
+  timestep_respacing: "250"
 
 vae:
   path: "stabilityai/stable-diffusion-xl-refiner-1.0"
@@ -35,7 +35,7 @@ vae:
 
 distributed:
   backend: "nccl"
-  world_size: 1  # Adjust according to the number of GPUs
+  world_size: 4  # Adjust according to the number of GPUs
 
 wandb:
   project: "DiT Robot Image Prediction"
