@@ -2,7 +2,7 @@ trainer:
   batch_size: 10
   global_seed: 0
   image_size: 128
-  n_epochs: 6001
+  n_epochs: 10001
   data_path: "data/object_mov.npy"
   eval_save_real: "results/diffusion_pinn_joint/real/epoch"
   eval_save_gen: "results/diffusion_pinn_joint/gen/epoch"
@@ -15,7 +15,7 @@ trainer:
   val_num: 1000
 
 model:
-  type: "DiTActionFramesSeqJoint"
+  type: "DiTActionFramesSeqJointCondition"
   input_size: 16
   patch_size: 2
   in_channels: 4

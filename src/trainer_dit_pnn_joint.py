@@ -10,6 +10,7 @@ from src.dataset.data_set_set_pinn import DatasetObjectSeqTrj, DatasetObjectSeqT
 from src.models.diffusion_trans_pnn import (
     DiTActionFramesSeqJoint,
     DiTActionFramesSeqJoint6,
+    DiTActionFramesSeqJointCondition,
 )
 from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
@@ -30,7 +31,9 @@ import copy
 
 def model_factory(model_config):
     model_classes = {
-        "DiTActionFramesSeqJoint": DiTActionFramesSeqJoint6,
+        "DiTActionFramesSeqJoint": DiTActionFramesSeqJoint,
+        "DiTActionFramesSeqJoint6": DiTActionFramesSeqJoint6,
+        "DiTActionFramesSeqJointCondition": DiTActionFramesSeqJointCondition,
     }
     type = model_config["type"]
     if type not in model_classes:
@@ -230,7 +233,7 @@ class DiTTrainerPNNJoint(TrainerBase):
 
             time.requires_grad = True
             initial_position.requires_grad = True
-            initial_velocity.requires_grad = True
+
             with torch.no_grad():
                 b, _, _, _, _ = frames_t.shape
                 x = rearrange(frames_t, "b f c h w -> (b f) c h w").contiguous()

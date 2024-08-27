@@ -13,6 +13,23 @@ from .embedders import TimestepEmbedder, ActionEmbedder
 from timm.models.vision_transformer import Mlp
 
 
+class MLPAttentionPooling(nn.Module):
+    def __init__(self, hidden_dim):
+        super(MLPAttentionPooling, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, x):
+        # x: (batch_size, seq_len, hidden_dim)
+        scores = self.mlp(x)  # Shape: (batch_size, seq_len, 1)
+        weights = torch.softmax(scores, dim=1)  # Normalize across sequence dimension
+        pooled_output = torch.sum(weights * x, dim=1)  # Weighted sum across tokens
+        return pooled_output
+
+
 class FinalLayer(nn.Module):
     """
     The final layer of DiT.
@@ -61,7 +78,7 @@ class DiTActionSeqAct(nn.Module):
             self.hidden_size,
             bias=True,
         )
-        self.a_embedder = ActionEmbedder(self.hidden_size, self.action_dim)
+        self.a_embedder = ActionEmbedder(self.hidden_size, 3)
         self.t_embedder = TimestepEmbedder(self.hidden_size)
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(
@@ -334,6 +351,7 @@ class DiTActionFramesSeqJoint6(DiTActionSeqAct):
         self.pos_embed_act.data.copy_(
             torch.from_numpy(pos_embed_act).float().unsqueeze(0)
         )
+        self.t_s_embedder = TimestepEmbedder(self.hidden_size)
         # self.img_c_embedder = nn.Linear(256, self.hidden_size)
         self.final_layer_act = FinalLayer(
             self.hidden_size, self.seq_len, self.action_dim
@@ -348,7 +366,7 @@ class DiTActionFramesSeqJoint6(DiTActionSeqAct):
         nn.init.constant_(self.first_block.adaLN_modulation[-1].bias, 0)
         # self.downsample_layer = nn.Linear(160, 3)
         mlp_hidden_dim = 4 * 160
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        approx_gelu = lambda: nn.Sigmoid()
         self.downsample_layer = Mlp(
             in_features=160,
             hidden_features=mlp_hidden_dim,
@@ -356,6 +374,11 @@ class DiTActionFramesSeqJoint6(DiTActionSeqAct):
             act_layer=approx_gelu,
             drop=0,
         )
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_s_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_s_embedder.mlp[2].weight, std=0.02)
+
         # Zero-out output layers:
         nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
@@ -404,6 +427,118 @@ class DiTActionFramesSeqJoint6(DiTActionSeqAct):
         x_act = self.downsample_layer(x_act)
         x = self.final_layer(x[:, :64, :], c)
         x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x, x_act
+
+
+class DiTActionFramesSeqJointCondition(DiTActionSeqAct):
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.pos_embed_act = nn.Parameter(
+            torch.zeros(1, 1, self.hidden_size), requires_grad=False
+        )
+        self.time_embed = nn.Parameter(
+            torch.zeros(1, 1, self.hidden_size), requires_grad=False
+        )
+        self.t_s_embedder = TimestepEmbedder(self.hidden_size)
+
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
+        )
+
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        self.v_embedder = ActionEmbedder(self.hidden_size * 4, 3)
+
+        pos_embed_act = get_1d_sincos_temp_embed(self.pos_embed_act.shape[-1], 1)
+        self.pos_embed_act.data.copy_(
+            torch.from_numpy(pos_embed_act).float().unsqueeze(0)
+        )
+
+        pos_embed_time = get_1d_sincos_temp_embed(self.time_embed.shape[-1], 1)
+        self.time_embed.data.copy_(
+            torch.from_numpy(pos_embed_time).float().unsqueeze(0)
+        )
+        # self.img_c_embedder = nn.Linear(256, self.hidden_size)
+        # self.final_layer_act = FinalLayer(
+        #     self.hidden_size, self.seq_len, self.action_dim
+        # )
+        mlp_hidden_dim = 4 * 160
+        approx_gelu = lambda: nn.Sigmoid()
+        self.downsample_layer = Mlp(
+            in_features=16,
+            hidden_features=mlp_hidden_dim,
+            out_features=3,
+            act_layer=approx_gelu,
+            drop=0,
+        )
+        self._att_pooling = MLPAttentionPooling(16)
+        # Zero-out output layers:
+        # nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].weight, 0)
+        # nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
+        # nn.init.constant_(self.final_layer_act.linear.weight, 0)
+        # nn.init.constant_(self.final_layer_act.linear.bias, 0)
+        # nn.init.normal_(self.downsample_layer.weight, std=0.02)
+
+        nn.init.normal_(self.v_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.v_embedder.mlp[2].weight, std=0.02)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_s_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_s_embedder.mlp[2].weight, std=0.02)
+
+    def forward(self, x, t, a, init, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+        pos = init[:, :3]
+        time = init[:, 3:7]
+        time = rearrange(time, "b d -> (b d)")
+        velocity = init[:, 7:]
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        init_pos = self.a_embedder(pos)
+        time = self.t_s_embedder(time)
+        time = repeat(time, "b f -> b c f", c=1) + self.time_embed
+
+        init_pos = repeat(init_pos, "b f -> b c f", c=self.seq_len)
+        init_pos = rearrange(init_pos, "b (c l) f -> (b c) l f", c=self.seq_len)
+        init_pos = init_pos + self.pos_embed_act  # (N, D) Action embedding
+        x = torch.cat((x, init_pos, time), dim=1)
+        t = self.t_embedder(t)  # (N, D)
+        y_emb = self.v_embedder(velocity)
+        y_emb = rearrange(y_emb, "b (c f) -> (b c) f", c=self.seq_len)
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=self.seq_len)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=(self.pos_embed.shape[1] + 2))
+        # y_feat = img_c.flatten(start_dim=1)
+        # y_emb = self.img_c_embedder(y_feat)
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + y_emb
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        c = timestep_spatial
+        x = self.final_layer(x, c)
+
+        x_act = self._att_pooling(x)
+        x_act = torch.einsum("nw->nw", x_act)
+        x_act = x_act.view((batch_sz, l, -1))
+        x_act = self.downsample_layer(x_act)
+        x = self.unpatchify(x[:, :64, :])  # (N, out_channels, H, W)
+
         x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
         return x, x_act
 
