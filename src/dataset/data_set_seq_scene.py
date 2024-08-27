@@ -104,7 +104,6 @@ class RobotDatasetSeqScene(Dataset):
         ).squeeze()
 
         return (
-            initial_img,
             data_trans,
             action_nm,
         )

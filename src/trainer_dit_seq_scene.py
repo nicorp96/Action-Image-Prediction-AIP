@@ -28,6 +28,10 @@ import os
 from .utils import update_ema, requires_grad
 from src.metrics.video_metrics import VideoMetrics
 from diffusers.optimization import get_scheduler
+from diffusers.schedulers import PNDMScheduler
+from .pipelines_video_gen import Trajectory2VideoGenPipeline
+import cv2
+
 
 class DiTTrainerScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
@@ -77,7 +81,7 @@ class DiTTrainerScene(TrainerBase):
                 transforms.ToTensor(),
                 # transforms.RandomHorizontalFlip(),
                 transforms.Resize((self.image_size, self.image_size)),
-                #transforms.CenterCrop(self.image_size),
+                # transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
@@ -93,7 +97,7 @@ class DiTTrainerScene(TrainerBase):
         #     transform=transform,
         #     sequence_length=model_config["seq_len"]
         # )
-        
+
         self.sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
@@ -112,10 +116,15 @@ class DiTTrainerScene(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-
+        self.val_dataset = None
+        # RobotDatasetSeqScene(
+        #     data_path=self.data_path,
+        #     transform=transform,
+        #     seq_l=model_config["seq_len"],
+        # )
         self.val_loader = (
-            DataLoader(val_dataset, batch_size=32, shuffle=False)
-            if val_dataset
+            DataLoader(self.val_dataset, batch_size=32, shuffle=False)
+            if self.val_dataset is not None
             else None
         )
 
@@ -126,11 +135,29 @@ class DiTTrainerScene(TrainerBase):
             weight_decay=self.config["trainer"]["weight_decay"],
         )
         self.lr_scheduler = get_scheduler(
-        name="constant",
-        optimizer=self.optimizer,
-        num_warmup_steps=self.config["trainer"]["lr_warmup_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
-        num_training_steps=self.config["trainer"]["max_train_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
+            name="constant",
+            optimizer=self.optimizer,
+            # num_warmup_steps=self.config["trainer"]["lr_warmup_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
+            num_training_steps=self.n_epochs
+            * self.config["trainer"]["gradient_accumulation_steps"],
         )
+        self.scheduler = None
+        if self.config["diffusion"]["sample_method"] == "PNDM":
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
+        elif self.config["diffusion"]["sample_method"]:
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
 
     def __load_config__(self):
         # Load config
@@ -166,31 +193,33 @@ class DiTTrainerScene(TrainerBase):
         self.ema.eval()  # EMA model should always be in eval mode
         best_loss = float("inf")
         step = 0
-        val_loss = None
+        val_loss = 0
         for epoch in range(self.n_epochs):
             self.sampler.set_epoch(epoch)
-            train_loss, val_loss = self._train_one_epoch(step)
+            train_loss = self._train_one_epoch(step)
+            if self.val_loader is not None:
+                if step % self.config["trainer"]["val_num"] == 0:
+                    val_loss = self._validate()
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        self._save_checkpoint(step)
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.validate_video_generation(step)
+
             print(
-                f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
-                end="",
+                f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
             )
-            if val_loss is not None:
-                print(f", Validation Loss: {val_loss:.4f}")
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    self._save_checkpoint()
-            else:
-                print("")
             step += 1
 
         self.model_ddp.eval()
-        self._save_checkpoint()
+        self._save_checkpoint(step)
+        dist.destroy_process_group()
         print("Training finished.")
 
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for step ,(next_seq, action) in enumerate(tqdm(self.data_loader, desc="Training")):
+        for next_seq, action in tqdm(self.data_loader, desc="Training"):
             next_seq, action = (
                 next_seq.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
@@ -201,7 +230,7 @@ class DiTTrainerScene(TrainerBase):
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
-            
+
             t = torch.randint(
                 0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
             )
@@ -220,129 +249,179 @@ class DiTTrainerScene(TrainerBase):
             # else:
             #     gradient_norm = clip_grad_norm_(model.module.parameters(), args.clip_max_norm, clip_grad=True)
             self.optimizer.step()
-            self.lr_scheduler
+            self.lr_scheduler.step()
             self.optimizer.zero_grad()
             update_ema(self.ema, self.model_ddp.module)
-            
             running_loss += loss.item()
-
-            if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate()
-                val_loss = val_loss.clone().detach()
-                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                avg_loss = avg_loss.item() / dist.get_world_size()
-                # with torch.no_grad():
-                #     model_kwargs = dict(a=action[:1,:,:], mask_frame_num=2)
-                    
-                #     z = torch.randn_like(
-                #         x[:1, :, :, :],
-                #         device=self.device,
-                #     )
-                #     z[:1, :2, :, :] = x[:1, :2, :, :]
-                #     samples = self.diffusion_s.p_sample_loop(
-                #         self.ema,
-                #         z.shape,
-                #         z,
-                #         clip_denoised=False,
-                #         progress=True,
-                #         model_kwargs=model_kwargs,
-                #         device=self.device,
-                #     )
-                #     samples = rearrange(
-                #         samples, "b f c h w -> (b f) c h w"
-                #     ).contiguous()
-
-                #     samples = self.vae.decode(samples / 0.18215).sample
-                #     samples = rearrange(
-                #         samples, "(b f) c h w -> b f c h w", b=1
-                #     ).contiguous()
-                    
-                #     batchsize = np.random.choice(1)
-
-                #     save_image(
-                #         samples[batchsize, :, :, :, :],
-                #         self.eval_save_gen_dir + f"_{step}.png",
-                #         nrow=5,
-                #         normalize=False,
-                #         #value_range=(0, 1),
-                #     )
-                #     save_image(
-                #         next_seq[batchsize,:,:,:,:],
-                #         self.eval_save_real_dir + f"_{step}.png",
-                #         nrow=5,
-                #         normalize=True,
-                #         #value_range=(-1, 1),
-                #     )
-        return running_loss, val_loss
+        return running_loss
 
     def _validate(self):
-        self.model.eval()
+        self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
             for next_seq, action in tqdm(self.val_loader, desc="Validation"):
                 next_seq, action = (
-                next_seq.to(self.device, dtype=torch.float32),
-                action.to(self.device, dtype=torch.float32),
+                    next_seq.to(self.device, dtype=torch.float32),
+                    action.to(self.device, dtype=torch.float32),
                 )
                 b, _, _, _, _ = next_seq.shape
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
                 t = torch.randint(
-                0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                    0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
                 )
                 model_kwargs = dict(a=action, mask_frame_num=2)
                 loss_dict = self.diffusion_s.training_losses(
-                self.model_ddp, x, t, model_kwargs
+                    self.model_ddp, x, t, model_kwargs
                 )
                 loss = loss_dict["loss"].mean()
-                running_loss += loss.item()
+                running_loss += loss
+        running_loss = running_loss.detach()
+        dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
+        running_loss = running_loss.item() / dist.get_world_size()
+        self.model_ddp.train()
         return running_loss / len(self.val_loader.dataset)
 
-    def _save_checkpoint(self,step):
-        torch.save(self.model_ddp.state_dict(), f"checkpoints/scene_bridge_epoch_{step}.pth")
+    def validate_video_generation(self, step):
+        batch_id = list(range(0, len(self.val_dataset), int(len(self.val_dataset) / 3)))
 
-    def save_image_actions(self, step, x, next_seq, actions_real):
-        model_kwargs = dict(a=actions_real, mask_frame_num=2)
-        b, _, _, _, _ = x.shape
-        z = torch.randn_like(
-            x,
-            device=self.device,
+        batch_list = [self.val_dataset.__getitem__(id) for id in batch_id]
+        actions = torch.cat(
+            [action.unsqueeze(0) for i, (video, action) in enumerate(batch_list)],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        true_video = torch.cat(
+            [video.unsqueeze(0) for i, (video, action) in enumerate(batch_list)],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+
+        mask_frame_num = self.mask_num
+        mask_x = true_video[:, 0:mask_frame_num]
+        with torch.no_grad():
+            b, f, _, _, _ = mask_x.shape
+            mask_x = rearrange(mask_x, "b f c h w -> (b f) c h w").contiguous()
+            mask_x = (
+                self.vae.encode(mask_x)
+                .latent_dist.sample()
+                .mul_(self.vae.config.scaling_factor)
+            )
+            mask_x = rearrange(mask_x, "(b f) c h w -> b f c h w", b=b, f=f)
+        videogen_pipeline = Trajectory2VideoGenPipeline(
+            vae=self.vae, scheduler=self.scheduler, transformer=self.ema
         )
-        z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
-        samples = self.diffusion_s.p_sample_loop(
-            self.ema,
-            z.shape,
-            z,
-            clip_denoised=False,
-            progress=True,
-            model_kwargs=model_kwargs,
+        print("Generation total {} videos".format(mask_x.size()[0]))
+
+        videos, latents = videogen_pipeline(
+            actions,
+            mask_x=mask_x,
+            video_length=self.config["model"]["seq_len"],
+            height=self.image_size,
+            width=self.image_size,
+            num_inference_steps=self.config["diffusion"]["infer_num_sampling_steps"],
+            guidance_scale=self.config["diffusion"]["guidance_scale"],  # dumpy
             device=self.device,
+            output_type="both",
         )
-        samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
-        samples = self.vae.decode(samples / 0.18215).sample
-        samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
-        batchsize = np.random.choice(b)
+        # videos = (
+        #     ((videos / 2.0 + 0.5).clamp(0, 1) * 255)
+        #     .detach()
+        #     .to(dtype=torch.uint8)
+        #     .cpu()
+        #     .contiguous()
+        # )
+        # true_video = (
+        #     ((true_video / 2.0 + 0.5).clamp(0, 1) * 255)
+        #     .detach()
+        #     .to(dtype=torch.uint8)
+        #     .cpu()
+        #     .contiguous()
+        # )
+        videos = torch.cat(
+            [
+                true_video[
+                    :,
+                    0:mask_frame_num,
+                    :,
+                    :,
+                    :,
+                ],
+                videos[:, mask_frame_num:, :, :, :],
+            ],
+            dim=1,
+        )
+        # videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        true_video = rearrange(true_video, "b f c h w -> (b f) c h w")
+        avg_psnr, avg_ssim = self.metrics.evaluate_video(videos, true_video)
+        print(f"psnr: {avg_psnr}  ssim: {avg_ssim}")
+        if self.config["trainer"]["wandb_log"]:
+            wandb.log({"psnr": avg_psnr})
+            wandb.log({"ssim": avg_ssim})
         save_image(
-            samples[batchsize, :, :, :, :],
+            videos,
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=5,
-            normalize=False,
-            #value_range=(-1, 1),
+            normalize=True,
+            value_range=(-1, 1),
         )
         save_image(
-            next_seq[batchsize, :, :, :, :],
+            true_video,
             self.eval_save_real_dir + f"_{step}.png",
             nrow=5,
             normalize=True,
             value_range=(-1, 1),
         )
-        avg_psnr, avg_ssim = self.metrics.evaluate_video(
-            samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
-        )
-        if self.config["trainer"]["wandb_log"]:
-            wandb.log({"psnr": avg_psnr})
-            wandb.log({"ssim": avg_ssim})
+
+    def _save_checkpoint(self, step):
+        checkpoint = {
+            "model": self.model_ddp.module.state_dict(),
+            "ema": self.ema.state_dict(),
+            "opt": self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, f"checkpoints/scene_scene_epoch_{step}.pth")
+
+    # def save_image_actions(self, step, x, next_seq, actions_real):
+    #     model_kwargs = dict(a=actions_real, mask_frame_num=2)
+    #     b, _, _, _, _ = x.shape
+    #     z = torch.randn_like(
+    #         x,
+    #         device=self.device,
+    #     )
+    #     z[:, : self.mask_num, :, :] = x[:, : self.mask_num, :, :]
+    #     samples = self.diffusion_s.p_sample_loop(
+    #         self.ema,
+    #         z.shape,
+    #         z,
+    #         clip_denoised=False,
+    #         progress=True,
+    #         model_kwargs=model_kwargs,
+    #         device=self.device,
+    #     )
+    #     samples = rearrange(samples, "b f c h w -> (b f) c h w").contiguous()
+    #     samples = self.vae.decode(samples / 0.18215).sample
+    #     samples = rearrange(samples, "(b f) c h w -> b f c h w", b=b).contiguous()
+    #     batchsize = np.random.choice(b)
+    #     save_image(
+    #         samples[batchsize, :, :, :, :],
+    #         self.eval_save_gen_dir + f"_{step}.png",
+    #         nrow=5,
+    #         normalize=False,
+    #         # value_range=(-1, 1),
+    #     )
+    #     save_image(
+    #         next_seq[batchsize, :, :, :, :],
+    #         self.eval_save_real_dir + f"_{step}.png",
+    #         nrow=5,
+    #         normalize=True,
+    #         value_range=(-1, 1),
+    #     )
+    #     avg_psnr, avg_ssim = self.metrics.evaluate_video(
+    #         samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
+    #     )
+    #     if self.config["trainer"]["wandb_log"]:
+    #         wandb.log({"psnr": avg_psnr})
+    #         wandb.log({"ssim": avg_ssim})
 
 
 if __name__ == "__main__":

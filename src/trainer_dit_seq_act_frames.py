@@ -31,6 +31,8 @@ from diffusers.optimization import get_scheduler
 from src.metrics.video_metrics import VideoMetrics
 import os
 from .utils import update_ema, requires_grad
+from diffusers.schedulers import PNDMScheduler
+from .pipelines_video_gen import Trajectory2VideoGenPipeline
 
 
 def model_factory(model_config):
@@ -118,12 +120,12 @@ class DiTTrainerActFrames(TrainerBase):
         self.dataset = RobotDatasetSeqTrj(
             data_path=self.data_path, transform=transform, seq_l=model_config["seq_len"]
         )
-        val_dataset = RobotDatasetSeqTrj(
+        self.val_dataset = RobotDatasetSeqTrj(
             data_path=self.val_data_path,
             transform=transform,
             seq_l=model_config["seq_len"],
         )
-        sampler = DistributedSampler(
+        self.sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
             rank=self.rank,
@@ -135,7 +137,7 @@ class DiTTrainerActFrames(TrainerBase):
             self.dataset,
             batch_size=int(self.batch_size // dist.get_world_size()),
             shuffle=False,
-            sampler=sampler,
+            sampler=self.sampler,
             num_workers=2,
             pin_memory=True,
             drop_last=True,
@@ -143,8 +145,8 @@ class DiTTrainerActFrames(TrainerBase):
         )
 
         self.val_loader = (
-            DataLoader(val_dataset, batch_size=1, shuffle=False)
-            if val_dataset
+            DataLoader(self.val_dataset, batch_size=1, shuffle=False)
+            if self.val_dataset
             else None
         )
 
@@ -157,8 +159,26 @@ class DiTTrainerActFrames(TrainerBase):
         self.lr_scheduler = get_scheduler(
             name="constant",
             optimizer=self.optimizer,
-            num_training_steps=self.n_epochs,
+            num_training_steps=self.n_epochs
+            * self.config["trainer"]["gradient_accumulation_steps"],
         )
+        self.scheduler = None
+        if self.config["diffusion"]["sample_method"] == "PNDM":
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
+        elif self.config["diffusion"]["sample_method"]:
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
 
     def __load_config__(self):
         # Load config
@@ -196,18 +216,24 @@ class DiTTrainerActFrames(TrainerBase):
         step = 0
         val_loss = None
         for epoch in range(self.n_epochs):
+            self.sampler.set_epoch(epoch)
             train_loss = self._train_one_epoch(step)
-            if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate_one_epoch(step) if self.val_loader else None
             print(
                 f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
                 end="",
             )
-            if val_loss is not None:
-                print(f", Validation Loss: {val_loss:.4f}")
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    self._save_checkpoint()
+            if self.val_loader is not None:
+                if step % self.config["trainer"]["val_num"] == 0:
+                    val_loss = self._validate(step)
+                    val_loss = val_loss.clone().detach()
+                    dist.all_reduce(val_loss, op=dist.ReduceOp.SUM)
+                    val_loss = val_loss.item() / dist.get_world_size()
+                    print(f", Validation Loss: {val_loss:.4f}")
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        self._save_checkpoint(step)
+                # if step % self.config["trainer"]["val_num_gen"] == 0:
+                # self.validate_video_generation(step)
             else:
                 print(" ")
 
@@ -220,9 +246,9 @@ class DiTTrainerActFrames(TrainerBase):
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for current_img, next_seq, action in tqdm(self.data_loader, desc="Training"):
-            current_img, next_seq, action = (
-                current_img.to(device=self.device, dtype=torch.float32),
+        for goal_img, next_seq, action in tqdm(self.data_loader, desc="Training"):
+            goal_img, next_seq, action = (
+                goal_img.to(device=self.device, dtype=torch.float32),
                 next_seq.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
             )
@@ -233,7 +259,7 @@ class DiTTrainerActFrames(TrainerBase):
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
                 goal_img = (
-                    self.vae.encode(current_img[:1, :, :])
+                    self.vae.encode(goal_img[:1, :, :])
                     .latent_dist.sample()
                     .mul_(0.18215)
                 )
@@ -258,8 +284,6 @@ class DiTTrainerActFrames(TrainerBase):
             self.optimizer.zero_grad()
             update_ema(self.ema, self.model_ddp.module)
             running_loss += total_loss.item()
-
-            # if step % self.config["trainer"]["val_num"] == 0:
             #     self.save_image_actions(
             #         step=step,
             #         x=x,
@@ -270,13 +294,13 @@ class DiTTrainerActFrames(TrainerBase):
 
         return running_loss
 
-    def _validate_one_epoch(self, step):
+    def _validate(self, step):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for current_img, next_seq, action in tqdm(self.val_loader, desc="Training"):
-                current_img, next_seq, action = (
-                    current_img.to(device=self.device, dtype=torch.float32),
+            for goal_img, next_seq, action in tqdm(self.val_loader, desc="Training"):
+                goal_img, next_seq, action = (
+                    goal_img.to(device=self.device, dtype=torch.float32),
                     next_seq.to(self.device, dtype=torch.float32),
                     action.to(self.device, dtype=torch.float32),
                 )
@@ -285,19 +309,28 @@ class DiTTrainerActFrames(TrainerBase):
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
+                t = torch.randint(
+                    0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                )
                 goal_img = (
-                    self.vae.encode(current_img[:1, :, :])
+                    self.vae.encode(goal_img[:1, :, :])
                     .latent_dist.sample()
                     .mul_(0.18215)
                 )
-
-                self.save_image_actions(
-                    step=step,
-                    x=x,
-                    next_seq=next_seq,
-                    actions_real=action,
-                    goal_img=goal_img,
+                model_kwargs = dict(a=action, img_c=goal_img, mask_frame_num=2)
+                loss_dict = self.diffusion_s.training_losses(
+                    self.model_ddp, x, t, model_kwargs
                 )
+                loss = loss_dict["loss"].mean()
+                running_loss += loss.item()
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.save_image_actions(
+                        step=step,
+                        x=x,
+                        next_seq=next_seq,
+                        actions_real=action,
+                        goal_img=goal_img,
+                    )
 
         return running_loss / len(self.val_loader.dataset)
 

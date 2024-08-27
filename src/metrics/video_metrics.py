@@ -2,6 +2,7 @@ import torch.nn.functional as F
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
 
+
 class VideoMetrics:
     def __init__(self, device, max_val=1.0, vae=None):
         self.max_val = max_val
