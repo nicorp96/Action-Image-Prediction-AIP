@@ -156,9 +156,7 @@ class BridgeDatasetMC(BridgeDataset):
         video_sequence = torch.stack(video_sequence)
         # state_sequence = torch.tensor(state_sequence, dtype=torch.float32)
         actions_sequence = torch.tensor(actions_sequence, dtype=torch.float32)
-        first_frame = video_sequence[0]
-        
-        return first_frame, video_sequence, actions_sequence, normals_v
+        return video_sequence, actions_sequence, normals_v
 
 
 if __name__ == "__main__":

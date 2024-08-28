@@ -1,7 +1,7 @@
 trainer:
   batch_size: 64
   global_seed: 0
-  image_size: 256
+  image_size: 128
   n_epochs: 150001
   data_path: "ds_bridge/training/annotation"
   eval_save_real: "results/Bridge/DiTTrainerSceneMC/real/epoch"
@@ -10,11 +10,13 @@ trainer:
   weight_decay: 0
   cuda_num: 0
   wandb_log: false
-  val_num: 5000
+  val_num: 20
+  val_num_gen: 10000
+  gradient_accumulation_steps: 1
 
 model:
-  type: "DiT"
-  input_size: 32
+  type: "LinearDiTActionMultiCondi" # LinearDiTActionMultiCondi, DiTActionSeqISimMultiCondi
+  input_size: 16
   patch_size: 2
   in_channels: 4
   hidden_size: 768
@@ -25,9 +27,20 @@ model:
   learn_sigma: false
   seq_len: 10
   mask_n: 2
+  attention_mode: "linear"
+
 
 diffusion:
+  sample_method: "PNDM"
+  scheduler_path: "pretrained_diff_models/scheduler"
   timestep_respacing: ""
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: "linear"
+  variance_type: "learned_range"
+  infer_num_sampling_steps: 50
+  guidance_scale: 1.0
+
 
 vae:
   path: "stabilityai/stable-diffusion-xl-refiner-1.0"
@@ -35,7 +48,7 @@ vae:
 
 distributed:
   backend: "nccl"
-  world_size: 1  # Adjust according to the number of GPUs
+  world_size: 4  # Adjust according to the number of GPUs
 
 wandb:
   project: "DiT Robot Image Prediction"

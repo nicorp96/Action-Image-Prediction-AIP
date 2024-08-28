@@ -294,6 +294,10 @@ class ConditionEmbedding(nn.Module):
         self.conv4 = nn.Conv2d(
             in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
         )
+        self.conv4 = nn.Conv2d(
+            in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
+        )  
+        self.max_pol = nn.MaxPool2d(4, 2)
 
         # ReLU activation
         self.relu = nn.ReLU()
@@ -313,6 +317,7 @@ class ConditionEmbedding(nn.Module):
         x = self.relu(self.conv2(x))
         x = self.relu(self.conv3(x))
         x = self.relu(self.conv4(x))
+        x = self.max_pol(x)
         return x
 
 
@@ -380,7 +385,7 @@ class LinearDiTActionMultiCondi(LinearDiTActionSeqISim):
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
         )
         self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
-        self.condition_emb = ConditionEmbedding(out_dim=96 * 5)
+        self.condition_emb = ConditionEmbedding(out_dim=960)
 
     def forward(self, x, t, a, c_m, mask_frame_num=None):
         """
@@ -390,7 +395,6 @@ class LinearDiTActionMultiCondi(LinearDiTActionSeqISim):
         a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
         """
         batch_sz, l, ch, h, w = x.shape
-
         x = rearrange(x, "b f c h w -> (b f) c h w")
         x = self.x_embedder(x) + self.pos_embed
         a = rearrange(a, "b f d -> (b f) d")
@@ -402,7 +406,6 @@ class LinearDiTActionMultiCondi(LinearDiTActionSeqISim):
         canny_emb = rearrange(canny_emb, "(b h) -> b h", b=a.shape[0])
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
         timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
-
         c = timestep_spatial + a + canny_emb
         x = self.blocks_mh[0](x, c)
         x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
