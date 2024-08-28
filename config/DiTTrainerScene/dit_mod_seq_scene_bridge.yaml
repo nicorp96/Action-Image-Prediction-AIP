@@ -15,7 +15,7 @@ trainer:
   gradient_accumulation_steps: 1
 
 model:
-  type: "DiT"
+  type: "LinearDiTActionSeqISim" #DiTActionSeqISim, DiTActionSeqFrameAtt, LinearDiTActionSeqISim, DiTActionSeqJoint
   input_size: 16
   patch_size: 2
   in_channels: 4
@@ -27,10 +27,11 @@ model:
   learn_sigma: false
   seq_len: 10
   mask_n: 2
+  attention_mode: "linear"
 
 diffusion:
   sample_method: "PNDM"
-  scheduler_path: "pretrained_models/scheduler"
+  scheduler_path: "pretrained_diff_models/scheduler"
   timestep_respacing: ""
   beta_start: 0.0001
   beta_end: 0.02

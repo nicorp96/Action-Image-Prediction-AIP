@@ -6,6 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from src.dataset.data_set_seq_scene import RobotDatasetSeqSceneCanny
+from src.dataset.data_set_bridge import BridgeDatasetMC
 from src.models.diffusion_frame_pred import (
     DiTActionSeqISimMultiCondi,
     LinearDiTActionMultiCondi,
@@ -25,7 +26,7 @@ import wandb
 import yaml
 from einops import rearrange
 import os
-from .utils import update_ema, requires_grad
+from .utils import update_ema, requires_grad, NormalizeVideo
 from src.metrics.video_metrics import VideoMetrics
 
 
@@ -88,18 +89,18 @@ class DiTTrainerSceneMC(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
+                NormalizeVideo(),
                 # transforms.RandomHorizontalFlip(),
-                transforms.Resize(self.image_size),
-                # transforms.CenterCrop(self.image_size),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Resize((self.image_size, self.image_size)),
+                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqSceneCanny(
-            data_path=self.data_path,
+        self.dataset = BridgeDatasetMC(
+            json_dir=self.data_path,
             transform=transform,
-            seq_l=model_config["seq_len"],
+            sequence_length=model_config["seq_len"],
         )
         self.sampler = DistributedSampler(
             self.dataset,
@@ -119,10 +120,14 @@ class DiTTrainerSceneMC(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-        self.val_dataset = val_dataset
+        self.val_dataset = BridgeDatasetMC(
+            json_dir=self.data_path,
+            transform=transform,
+            sequence_length=model_config["seq_len"],
+        )
         self.val_loader = (
-            DataLoader(val_dataset, batch_size=32, shuffle=False)
-            if val_dataset
+            DataLoader(self.val_dataset, batch_size=32, shuffle=False)
+            if self.val_dataset
             else None
         )
         self.criterion = nn.MSELoss()
@@ -287,8 +292,13 @@ class DiTTrainerSceneMC(TrainerBase):
         self.model_ddp.train()
         return running_loss / step_val
 
-    def _save_checkpoint(self):
-        torch.save(self.model_ddp.state_dict(), "best_model.pth")
+    def _save_checkpoint(self, step):
+        checkpoint = {
+            "model": self.model_ddp.module.state_dict(),
+            "ema": self.ema.state_dict(),
+            "opt": self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, f"checkpoints/scene_mc_epoch_{step}.pth")
 
     def save_image_actions(self, step, x, frames, actions_real, canny):
         model_kwargs = dict(
