@@ -16,6 +16,8 @@ trainer:
   val_num: 20
   val_num_gen: 5000
   gradient_accumulation_steps: 1
+  loss_alpha: 1.0
+  loss_beta: 1.0
 
 model:
   type: "DiTActionFramesSeq4"
@@ -30,7 +32,7 @@ model:
   learn_sigma: false
   seq_len: 10
   mask_n: 2
-  attention_mode: "causal_linear"
+  attention_mode: "linear"
 
 diffusion:
   sample_method: "PNDM"

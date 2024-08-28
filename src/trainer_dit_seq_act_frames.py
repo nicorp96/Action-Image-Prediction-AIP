@@ -84,6 +84,8 @@ class DiTTrainerActFrames(TrainerBase):
         self.eval_act_save_real_dir = os.path.join(
             base, self.config["trainer"]["action_save_real"]
         )
+        self._loss_alpha = self.config["trainer"]["loss_alpha"]
+        self._loss_beta = self.config["trainer"]["loss_beta"]
         self.mask_num = model_config["mask_n"]
         self.ema = deepcopy(self.model_dit).to(
             self.device
@@ -270,7 +272,7 @@ class DiTTrainerActFrames(TrainerBase):
             if self.config["trainer"]["wandb_log"]:
                 wandb.log({"loss": loss})
                 wandb.log({"loss_act": loss_act})
-            total_loss = loss + loss_act
+            total_loss = self._loss_alpha * loss + self._loss_beta * loss_act
             total_loss.backward()
             self.optimizer.step()
             self.lr_scheduler.step()

@@ -16,6 +16,8 @@ trainer:
   val_num: 20
   val_num_gen: 10000
   gradient_accumulation_steps: 1
+  loss_alpha: 1.0
+  loss_beta: 1.0
 
 model:
   type: "DiTActionFramesSeq5"
