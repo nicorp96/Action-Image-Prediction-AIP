@@ -27,6 +27,7 @@ from einops import rearrange
 import os
 from .utils import update_ema, requires_grad
 from src.metrics.video_metrics import VideoMetrics
+from .pipelines_video_gen import Trajectory2VideoGenMCPipeline
 
 
 def model_factory(model_config):
@@ -286,6 +287,111 @@ class DiTTrainerSceneMC(TrainerBase):
         running_loss = running_loss.item() / dist.get_world_size()
         self.model_ddp.train()
         return running_loss / step_val
+
+    def validate_video_generation(self, step):
+        batch_id = list(range(0, len(self.val_dataset), int(len(self.val_dataset) / 3)))
+
+        batch_list = [self.val_dataset.__getitem__(id) for id in batch_id]
+        actions = torch.cat(
+            [
+                action.unsqueeze(0)
+                for i, (video, action, extra_c) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        true_video = torch.cat(
+            [
+                video.unsqueeze(0)
+                for i, (video, action, extra_c) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+
+        extra_c = torch.cat(
+            [
+                extra_c.unsqueeze(0)
+                for i, (video, action, extra_c) in enumerate(batch_list)
+            ],
+            dim=0,
+        ).to(self.device, non_blocking=True, dtype=torch.float32)
+
+        mask_frame_num = self.mask_num
+        mask_x = true_video[:, 0:mask_frame_num]
+        with torch.no_grad():
+            b, f, _, _, _ = mask_x.shape
+            mask_x = rearrange(mask_x, "b f c h w -> (b f) c h w").contiguous()
+            mask_x = (
+                self.vae.encode(mask_x)
+                .latent_dist.sample()
+                .mul_(self.vae.config.scaling_factor)
+            )
+            mask_x = rearrange(mask_x, "(b f) c h w -> b f c h w", b=b, f=f)
+        videogen_pipeline = Trajectory2VideoGenMCPipeline(
+            vae=self.vae, scheduler=self.scheduler, transformer=self.ema
+        )
+        print("Generation total {} videos".format(mask_x.size()[0]))
+
+        videos, latents = videogen_pipeline(
+            actions,
+            mask_x=mask_x,
+            extra_c=extra_c[:, : self.mask_num, :, :],
+            video_length=self.config["model"]["seq_len"],
+            height=self.image_size,
+            width=self.image_size,
+            num_inference_steps=self.config["diffusion"]["infer_num_sampling_steps"],
+            guidance_scale=self.config["diffusion"]["guidance_scale"],  # dumpy
+            device=self.device,
+            output_type="both",
+        )
+        # videos = (videos / 2.0 + 0.5).clamp(0, 1)
+        # true_video = (
+        #     ((true_video / 2.0 + 0.5).clamp(0, 1) * 255)
+        #     .detach()
+        #     .to(dtype=torch.uint8)
+        #     .cpu()
+        #     .contiguous()
+        # )
+        videos = torch.cat(
+            [
+                true_video[
+                    :,
+                    0:mask_frame_num,
+                    :,
+                    :,
+                    :,
+                ],
+                videos[:, mask_frame_num:, :, :, :],
+            ],
+            dim=1,
+        )
+        avg_psnr, avg_ssim, avg_fid = self.metrics.evaluate_video(videos, true_video)
+        # videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        true_video = rearrange(true_video, "b f c h w -> (b f) c h w")
+
+        print(
+            "\n------------------------|| Metrics Validation ||--------------------------------"
+        )
+        print(f" || psnr: {avg_psnr}  ssim: {avg_ssim}  fid: {avg_fid} ||")
+        if self.config["trainer"]["wandb_log"]:
+            wandb.log({"psnr": avg_psnr})
+            wandb.log({"ssim": avg_ssim})
+            wandb.log({"fid": avg_fid})
+
+        save_image(
+            videos,
+            self.eval_save_gen_dir + f"_{step}.png",
+            nrow=self.config["model"]["seq_len"],
+            normalize=True,
+            # value_range=(-1, 1),
+        )
+        save_image(
+            true_video,
+            self.eval_save_real_dir + f"_{step}.png",
+            nrow=self.config["model"]["seq_len"],
+            normalize=True,
+            # value_range=(-1, 1),
+        )
 
     def _save_checkpoint(self):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
