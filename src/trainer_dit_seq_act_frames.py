@@ -283,7 +283,9 @@ class DiTTrainerActFrames(TrainerBase):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for goal_img, next_seq, action in tqdm(self.val_loader, desc="Validation"):
+            for step_val, (goal_img, next_seq, action) in enumerate(
+                tqdm(self.val_loader, desc="Validation")
+            ):
                 goal_img, next_seq, action = (
                     goal_img.to(device=self.device, dtype=torch.float32),
                     next_seq.to(self.device, dtype=torch.float32),
@@ -312,7 +314,7 @@ class DiTTrainerActFrames(TrainerBase):
         dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
         running_loss = running_loss.item() / dist.get_world_size()
         self.model_ddp.train()
-        return running_loss / len(self.val_loader.dataset)
+        return running_loss / step_val
 
     def _save_checkpoint(self, step):
         checkpoint = {
@@ -367,9 +369,9 @@ class DiTTrainerActFrames(TrainerBase):
             vae=self.vae, scheduler=self.scheduler, transformer=self.ema
         )
         print("Generation total {} videos".format(mask_x.size()[0]))
-        actions = actions[:, :mask_frame_num, :]
+        # actions = actions[:, :mask_frame_num, :]
         videos, latents, actions_pred = videogen_pipeline(
-            actions,
+            actions[:, :mask_frame_num, :],
             mask_x=mask_x,
             goal_image=goal_image,
             video_length=self.config["model"]["seq_len"],
@@ -380,6 +382,7 @@ class DiTTrainerActFrames(TrainerBase):
             device=self.device,
             output_type="both",
         )
+        videos = (videos / 2.0 + 0.5).clamp(-1, 1)
         videos = torch.cat(
             [
                 true_video[
@@ -393,27 +396,32 @@ class DiTTrainerActFrames(TrainerBase):
             ],
             dim=1,
         )
-        # videos = rearrange(videos, "b f c h w -> (b f) c h w")
+        avg_psnr, avg_ssim, avg_fid = self.metrics.evaluate_video(
+            videos, true_video, mask_frame_num
+        )
         videos = rearrange(videos, "b f c h w -> (b f) c h w")
         true_video = rearrange(true_video, "b f c h w -> (b f) c h w")
-        avg_psnr, avg_ssim = self.metrics.evaluate_video(videos, true_video)
-        print(f"psnr: {avg_psnr}  ssim: {avg_ssim}")
+        print(
+            "\n------------------------|| Metrics Validation ||--------------------------------"
+        )
+        print(f" || psnr: {avg_psnr}  ssim: {avg_ssim}  fid: {avg_fid} ||")
         if self.config["trainer"]["wandb_log"]:
             wandb.log({"psnr": avg_psnr})
             wandb.log({"ssim": avg_ssim})
+            wandb.log({"fid": avg_fid})
         save_image(
             videos,
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
             normalize=True,
-            value_range=(-1, 1),
+            # value_range=(-1, 1),
         )
         save_image(
             true_video,
             self.eval_save_real_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
             normalize=True,
-            value_range=(-1, 1),
+            # value_range=(-1, 1),
         )
 
         np.savetxt(
@@ -423,12 +431,12 @@ class DiTTrainerActFrames(TrainerBase):
         )
         np.savetxt(
             self.eval_act_save_real_dir + f"_{step}.csv",
-            actions_pred[0, :, :].detach().cpu().numpy(),
+            actions[0, :, :].detach().cpu().numpy(),
             delimiter=",",
         )
         self.log_accuracy(
             predicted_actions=actions_pred.detach().cpu().numpy(),
-            real_actions=actions_pred.detach().cpu().numpy(),
+            real_actions=actions.detach().cpu().numpy(),
         )
 
     # def save_image_actions(self, step, x, next_seq, actions_real, goal_img):
@@ -522,6 +530,7 @@ class DiTTrainerActFrames(TrainerBase):
             return 0
 
     def log_accuracy(self, predicted_actions, real_actions):
+        assert predicted_actions.shape == real_actions.shape
         total_position_error = 0
         total_orientation_error = 0
         total_gripper_accuracy = 0
@@ -548,8 +557,9 @@ class DiTTrainerActFrames(TrainerBase):
         mean_position_error = total_position_error  # / b_sz
         mean_orientation_error = total_orientation_error  # / b_sz
         # mean_gripper_accuracy = total_gripper_accuracy / b_sz
-        # print(f"\n mean_position_error: {mean_position_error}")
-        # print(f"\n mean_orientation_error: {mean_orientation_error}")
+        print(
+            f"| mean_position_error: {mean_position_error} mean_orientation_error: {mean_orientation_error} |\n"
+        )
         # print(f"\n mean_gripper_accuracy: {mean_gripper_accuracy}")
 
         if self.config["trainer"]["wandb_log"]:

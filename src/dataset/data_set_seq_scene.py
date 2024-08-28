@@ -86,7 +86,7 @@ class RobotDatasetSeqScene(Dataset):
         s, w, h, c = data_obs_i["image_after_action"].shape
         data_trans = torch.zeros((s, c, self.img_size, self.img_size))
         if self.transform:
-            initial_img = self.transform(data_obs_i["image_current"])
+            # initial_img = self.transform(data_obs_i["image_current"])
             data_trans = torch.stack(
                 [self.transform(img) for img in data_obs_i["image_after_action"]]
             )
@@ -155,7 +155,6 @@ class RobotDatasetSeqSceneCanny(RobotDatasetSeqScene):
         s, w, h, c = data_obs_i["image_after_action"].shape
         data_trans = torch.zeros((s, c, self.img_size, self.img_size))
         if self.transform:
-            initial_img = self.transform(data_obs_i["image_current"])
             data_trans = torch.stack(
                 [self.transform(img) for img in data_obs_i["image_after_action"]]
             )
@@ -178,7 +177,7 @@ class RobotDatasetSeqSceneCanny(RobotDatasetSeqScene):
             method="min-max",
         ).squeeze()
 
-        return (initial_img, data_trans, action_nm, canny_v)
+        return (data_trans, action_nm, canny_v)
 
 
 def collate_fn(batch):

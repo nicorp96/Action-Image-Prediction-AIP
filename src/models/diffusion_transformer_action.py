@@ -75,7 +75,7 @@ class DiTActionSeqAct(nn.Module):
                     self.hidden_size,
                     self.num_heads,
                     mlp_ratio=self.mlp_ratio,
-                    attention_mode="linear",
+                    attention_mode=config["attention_mode"],
                 )
                 for _ in range(self.depth)
             ]

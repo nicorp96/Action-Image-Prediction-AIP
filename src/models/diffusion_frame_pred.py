@@ -6,6 +6,7 @@ from einops import rearrange, repeat
 from .difussion_utils.transformers_utils import (
     DiTBlock,
     DiTBlockFrameAttention,
+    MMDiTBlockJointAction,
     modulate,
     get_2d_sincos_pos_embed,
     get_1d_sincos_temp_embed,
@@ -69,7 +70,12 @@ class DiTActionSeq(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                DiTBlock(self.hidden_size, self.num_heads, mlp_ratio=self.mlp_ratio)
+                DiTBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attention_mode=config["attention_mode"],
+                )
                 for _ in range(self.depth)
             ]
         )
@@ -206,6 +212,76 @@ class DiTActionSeqISim(DiTActionSeq):
         return x
 
 
+class LinearDiTActionSeqISim(DiTActionSeq):
+    # https://github.com/bytedance/IRASim/blob/main/models/irasim.py
+    def __init__(self, config):
+        super().__init__(config)
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
+        )
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        self.blocks_mh = nn.ModuleList(
+            [
+                DiTBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attention_mode="math",
+                )
+                for _ in range(4)
+            ]
+        )
+        for block in self.blocks_mh:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+    def forward(self, x, t, a, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = rearrange(a, "b f d -> (b f) d")
+        a = self.a_embedder(a)  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
+        c = timestep_spatial + a
+        x = self.blocks_mh[0](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        x = x + self.temp_embed[:, 0:l]
+        c = timestep_temp
+        x = self.blocks_mh[1](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + a
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        c = timestep_spatial + a
+        x = self.blocks_mh[2](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        c = timestep_temp
+        x = self.blocks_mh[3](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        c = timestep_spatial + a
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x
+
+
 class ConditionEmbedding(nn.Module):
 
     def __init__(self, out_dim=1200):
@@ -251,7 +327,7 @@ class DiTActionSeqISimMultiCondi(DiTActionSeq):
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
         )
         self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
-        self.condition_emb = ConditionEmbedding(out_dim=96 * 5)
+        self.condition_emb = ConditionEmbedding(out_dim=96 * 10)
 
     def forward(self, x, t, a, c_m, mask_frame_num=None):
         """
@@ -293,6 +369,70 @@ class DiTActionSeqISimMultiCondi(DiTActionSeq):
         return x
 
 
+class LinearDiTActionMultiCondi(LinearDiTActionSeqISim):
+    # https://arxiv.org/pdf/2302.05543
+    def __init__(self, config):
+        super().__init__(config)
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
+        )
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        self.condition_emb = ConditionEmbedding(out_dim=96 * 5)
+
+    def forward(self, x, t, a, c_m, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = rearrange(a, "b f d -> (b f) d")
+        a = self.a_embedder(a)  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        c_m = rearrange(c_m, "b l c w h-> (b l) c w h")  # [32*2, 3, 64, 64]
+        canny_emb = self.condition_emb(c_m)
+        canny_emb = canny_emb.flatten()
+        canny_emb = rearrange(canny_emb, "(b h) -> b h", b=a.shape[0])
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
+
+        c = timestep_spatial + a + canny_emb
+        x = self.blocks_mh[0](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        x = x + self.temp_embed[:, 0:l]
+        c = timestep_temp
+        x = self.blocks_mh[1](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + a + canny_emb
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        c = timestep_spatial + a + canny_emb
+        x = self.blocks_mh[2](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        c = timestep_temp
+        x = self.blocks_mh[3](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        c = timestep_spatial + a + canny_emb
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x
+
+
 class DiTActionSeqFrameAtt(DiTActionSeq):
     # https://arxiv.org/pdf/2302.05543
     def __init__(self, config):
@@ -310,16 +450,16 @@ class DiTActionSeqFrameAtt(DiTActionSeq):
             mlp_ratio=self.mlp_ratio,
         )
 
-        self.final_block = DiTBlockFrameAttention(
-            self.hidden_size,
-            self.num_heads,
-            mlp_ratio=self.mlp_ratio,
-        )
+        # self.final_block = DiTBlockFrameAttention(
+        #     self.hidden_size,
+        #     self.num_heads,
+        #     mlp_ratio=self.mlp_ratio,
+        # )
 
         nn.init.constant_(self.first_block.adaLN_modulation_x[-1].weight, 0)
         nn.init.constant_(self.first_block.adaLN_modulation_x[-1].bias, 0)
-        nn.init.constant_(self.final_block.adaLN_modulation_x[-1].weight, 0)
-        nn.init.constant_(self.final_block.adaLN_modulation_x[-1].bias, 0)
+        # nn.init.constant_(self.final_block.adaLN_modulation_x[-1].weight, 0)
+        # nn.init.constant_(self.final_block.adaLN_modulation_x[-1].bias, 0)
 
     def forward(self, x, t, a, mask_frame_num=None):
         """
@@ -371,11 +511,11 @@ class DiTActionSeqFrameMultAtt(DiTActionSeq):
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
         )
         self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
-        self.first_block = DiTBlockFrameAttention(
-            self.hidden_size,
-            self.num_heads,
-            mlp_ratio=self.mlp_ratio,
-        )
+        # self.first_block = DiTBlockFrameAttention(
+        #     self.hidden_size,
+        #     self.num_heads,
+        #     mlp_ratio=self.mlp_ratio,
+        # )
         self.first_blocks = nn.ModuleList(
             [
                 DiTBlockFrameAttention(
@@ -424,6 +564,134 @@ class DiTActionSeqFrameMultAtt(DiTActionSeq):
             x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
 
         c = timestep_spatial + a
+        # x = self.final_block(x, c)
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x
+
+
+class DiTActionSeqFrameMultAtt(DiTActionSeq):
+    # https://arxiv.org/pdf/2302.05543
+    def __init__(self, config):
+        super().__init__(config)
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
+        )
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        # self.first_block = DiTBlockFrameAttention(
+        #     self.hidden_size,
+        #     self.num_heads,
+        #     mlp_ratio=self.mlp_ratio,
+        # )
+        self.first_blocks = nn.ModuleList(
+            [
+                DiTBlockFrameAttention(
+                    self.hidden_size, self.num_heads, mlp_ratio=self.mlp_ratio
+                )
+                for _ in range(2)
+            ]
+        )
+        for first_block in self.first_blocks:
+            nn.init.constant_(first_block.adaLN_modulation_x[-1].weight, 0)
+            nn.init.constant_(first_block.adaLN_modulation_x[-1].bias, 0)
+        # nn.init.constant_(self.final_block.adaLN_modulation_x[-1].weight, 0)
+        # nn.init.constant_(self.final_block.adaLN_modulation_x[-1].bias, 0)
+
+    def forward(self, x, t, a, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = rearrange(a, "b f d -> (b f) d")
+        a = self.a_embedder(a)  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
+        c = timestep_spatial + a
+
+        for f_block in self.first_blocks:
+            x = f_block(x, c)  # (N, T, D)
+
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + a
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        c = timestep_spatial + a
+        # x = self.final_block(x, c)
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)  # (N, out_channels, H, W)
+        x = rearrange(x, "(b f) c h w -> b f c h w", b=batch_sz)
+        return x
+
+
+class DiTActionSeqJoint(DiTActionSeq):
+    # https://arxiv.org/pdf/2302.05543
+    def __init__(self, config):
+        super().__init__(config)
+        self.temp_embed = nn.Parameter(
+            torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
+        )
+        temp_embed = get_1d_sincos_temp_embed(
+            self.temp_embed.shape[-1], self.temp_embed.shape[-2]
+        )
+        self.temp_embed.data.copy_(torch.from_numpy(temp_embed).float().unsqueeze(0))
+        self.first_block = MMDiTBlockJointAction(
+            self.hidden_size,
+            self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+        )
+        nn.init.constant_(self.first_block.adaLN_modulation_x[-1].weight, 0)
+        nn.init.constant_(self.first_block.adaLN_modulation_x[-1].bias, 0)
+
+    def forward(self, x, t, a, mask_frame_num=None):
+        """
+        Forward pass of DiT which now also takes actions as input
+        x: (N, L, C, H, W) tensor of video inputs
+        t: (N,) tensor of diffusion timesteps
+        a: (N, C, 7) tensor of actions (TCP positions in (x, y, z, rpx, rpy, rpz))
+        """
+        batch_sz, l, ch, h, w = x.shape
+
+        x = rearrange(x, "b f c h w -> (b f) c h w")
+        x = self.x_embedder(x) + self.pos_embed
+        a = rearrange(a, "b f d -> (b f) d")
+        a = self.a_embedder(a)  # (N, D) Action embedding
+        t = self.t_embedder(t)  # (N, D)
+        timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
+        timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
+        c = timestep_spatial
+        x = self.first_block(x, a, c)
+        for i in range(0, len(self.blocks), 2):
+            spatial_block, temp_block = self.blocks[i : i + 2]
+            c = timestep_spatial + a
+            x = spatial_block(x, c)
+            x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+            # Add Time Embedding
+            if i == 0:
+                x = x + self.temp_embed[:, 0:l]
+            c = timestep_temp
+            x = temp_block(x, c)
+            x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+
+        # c = timestep_spatial + a
         # x = self.final_block(x, c)
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)  # (N, out_channels, H, W)

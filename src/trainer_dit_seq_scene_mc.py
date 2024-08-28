@@ -6,14 +6,19 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from src.dataset.data_set_seq_scene import RobotDatasetSeqSceneCanny
-from src.models.diffusion_frame_pred import DiTActionSeqISimMultiCondi
+from src.models.diffusion_frame_pred import (
+    DiTActionSeqISimMultiCondi,
+    LinearDiTActionMultiCondi,
+)
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq
 from diffusers.models import AutoencoderKL
 from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
 from torchvision.utils import save_image
+from diffusers.optimization import get_scheduler
 import matplotlib.pyplot as plt
+from diffusers.schedulers import PNDMScheduler
 import numpy as np
 from sklearn.manifold import TSNE
 import wandb
@@ -22,6 +27,19 @@ from einops import rearrange
 import os
 from .utils import update_ema, requires_grad
 from src.metrics.video_metrics import VideoMetrics
+
+
+def model_factory(model_config):
+    model_classes = {
+        "DiTActionSeqISimMultiCondi": DiTActionSeqISimMultiCondi,
+        "LinearDiTActionMultiCondi": LinearDiTActionMultiCondi,
+    }
+    type = model_config["type"]
+    if type not in model_classes:
+        raise ValueError(f"Unknown model type: {type}")
+
+    model_class = model_classes[type]
+    return model_class(model_config)
 
 
 class DiTTrainerSceneMC(TrainerBase):
@@ -41,7 +59,7 @@ class DiTTrainerSceneMC(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionSeqISimMultiCondi(model_config)
+        self.model_dit = model_factory(model_config)
         self.mask_num = model_config["mask_n"]
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
@@ -72,7 +90,7 @@ class DiTTrainerSceneMC(TrainerBase):
                 transforms.ToTensor(),
                 # transforms.RandomHorizontalFlip(),
                 transforms.Resize(self.image_size),
-                #transforms.CenterCrop(self.image_size),
+                # transforms.CenterCrop(self.image_size),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
@@ -83,7 +101,7 @@ class DiTTrainerSceneMC(TrainerBase):
             transform=transform,
             seq_l=model_config["seq_len"],
         )
-        sampler = DistributedSampler(
+        self.sampler = DistributedSampler(
             self.dataset,
             num_replicas=dist.get_world_size(),
             rank=self.rank,
@@ -95,25 +113,48 @@ class DiTTrainerSceneMC(TrainerBase):
             self.dataset,
             batch_size=int(self.batch_size // dist.get_world_size()),
             shuffle=False,
-            sampler=sampler,
+            sampler=self.sampler,
             num_workers=2,
             pin_memory=True,
             drop_last=True,
             # collate_fn=collate_fn,
         )
-
+        self.val_dataset = val_dataset
         self.val_loader = (
             DataLoader(val_dataset, batch_size=32, shuffle=False)
             if val_dataset
             else None
         )
-
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(
             self.model_ddp.parameters(),
             lr=self.config["trainer"]["learning_rate"],
             weight_decay=self.config["trainer"]["weight_decay"],
         )
+        self.lr_scheduler = get_scheduler(
+            name="constant",
+            optimizer=self.optimizer,
+            # num_warmup_steps=self.config["trainer"]["lr_warmup_steps"] * self.config["trainer"]["gradient_accumulation_steps"] ,
+            num_training_steps=self.n_epochs
+            * self.config["trainer"]["gradient_accumulation_steps"],
+        )
+        self.scheduler = None
+        if self.config["diffusion"]["sample_method"] == "PNDM":
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
+        elif self.config["diffusion"]["sample_method"]:
+            self.scheduler = PNDMScheduler.from_pretrained(
+                self.config["diffusion"]["scheduler_path"],
+                beta_start=self.config["diffusion"]["beta_start"],
+                beta_end=self.config["diffusion"]["beta_end"],
+                beta_schedule=self.config["diffusion"]["beta_schedule"],
+                variance_type=self.config["diffusion"]["variance_type"],
+            )
 
     def __load_config__(self):
         # Load config
@@ -153,43 +194,41 @@ class DiTTrainerSceneMC(TrainerBase):
         step = 0
         val_loss = None
         for epoch in range(self.n_epochs):
+            self.sampler.set_epoch(epoch)
             train_loss = self._train_one_epoch(step)
-            if step % self.config["trainer"]["val_num"] == 0:
-                val_loss = self._validate_one_epoch() if self.val_loader else None
+            if self.val_loader is not None:
+                if step % self.config["trainer"]["val_num"] == 0:
+                    val_loss = self._validate()
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        self._save_checkpoint(step)
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.validate_video_generation(step)
+
             print(
-                f"Epoch {epoch+1}/{self.n_epochs}, Training Loss: {train_loss:.4f}",
-                end="",
+                f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
             )
-            if val_loss is not None:
-                print(f", Validation Loss: {val_loss:.4f}")
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    self._save_checkpoint()
-            else:
-                print(" ")
 
             step += 1
 
         self.model_ddp.eval()
-        self._save_checkpoint()
+        self._save_checkpoint(step)
+        dist.destroy_process_group()
         print("Training finished.")
 
     def _train_one_epoch(self, step):
         self.model_ddp.train()
         running_loss = 0.0
-        for current_img, next_seq, action, canny in tqdm(
-            self.data_loader, desc="Training"
-        ):
-            current_img, next_seq, action, canny = (
-                current_img.to(device=self.device, dtype=torch.float32),
-                next_seq.to(self.device, dtype=torch.float32),
+        for frames, action, canny in tqdm(self.data_loader, desc="Training"):
+            frames, action, canny = (
+                frames.to(self.device, dtype=torch.float32),
                 action.to(self.device, dtype=torch.float32),
                 canny.to(self.device, dtype=torch.float32),
             )
 
             with torch.no_grad():
-                b, _, _, _, _ = next_seq.shape
-                x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
+                b, _, _, _, _ = frames.shape
+                x = rearrange(frames, "b f c h w -> (b f) c h w").contiguous()
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
 
@@ -209,34 +248,49 @@ class DiTTrainerSceneMC(TrainerBase):
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            self.lr_scheduler.step()
+            self.optimizer.zero_grad()
             update_ema(self.ema, self.model_ddp.module)
             running_loss += loss.item()
-
-            if step % self.config["trainer"]["val_num"] == 0:
-                with torch.no_grad():
-                    self.save_image_actions(step, x, next_seq, action, canny)
-
         return running_loss
 
-    def _validate_one_epoch(self):
-        self.model.eval()
+    def _validate(self):
+        self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for images, actions, timesteps in tqdm(self.val_loader, desc="Validation"):
-                images, actions, timesteps = (
-                    images.to(self.device),
-                    actions.to(self.device),
-                    timesteps.to(self.device),
+            for step_val, (frames, action, canny) in enumerate(
+                tqdm(self.data_loader, desc="Training")
+            ):
+                frames, action, canny = (
+                    frames.to(self.device, dtype=torch.float32),
+                    action.to(self.device, dtype=torch.float32),
+                    canny.to(self.device, dtype=torch.float32),
                 )
-                outputs = self.model(images, timesteps, actions)
-                loss = self.criterion(outputs, images)
-                running_loss += loss.item() * images.size(0)
-        return running_loss / len(self.val_loader.dataset)
+                b, _, _, _, _ = frames.shape
+                x = rearrange(frames, "b f c h w -> (b f) c h w").contiguous()
+                x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
+                x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
+                t = torch.randint(
+                    0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                )
+                model_kwargs = dict(
+                    a=action, c_m=canny[:, : self.mask_num, :, :], mask_frame_num=2
+                )
+                loss_dict = self.diffusion_s.training_losses(
+                    self.model_ddp, x, t, model_kwargs
+                )
+                loss = loss_dict["loss"].mean()
+                running_loss += loss
+        running_loss = running_loss.detach()
+        dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
+        running_loss = running_loss.item() / dist.get_world_size()
+        self.model_ddp.train()
+        return running_loss / step_val
 
     def _save_checkpoint(self):
         torch.save(self.model_ddp.state_dict(), "best_model.pth")
 
-    def save_image_actions(self, step, x, next_seq, actions_real, canny):
+    def save_image_actions(self, step, x, frames, actions_real, canny):
         model_kwargs = dict(
             a=actions_real, c_m=canny[:, : self.mask_num, :, :], mask_frame_num=2
         )
@@ -267,14 +321,14 @@ class DiTTrainerSceneMC(TrainerBase):
             value_range=(-1, 1),
         )
         save_image(
-            next_seq[batchsize, :, :, :, :],
+            frames[batchsize, :, :, :, :],
             self.eval_save_real_dir + f"_{step}.png",
             nrow=5,
             normalize=True,
             value_range=(-1, 1),
         )
         avg_psnr, avg_ssim = self.metrics.evaluate_video(
-            samples[batchsize, :, :, :, :], next_seq[batchsize, :, :, :, :]
+            samples[batchsize, :, :, :, :], frames[batchsize, :, :, :, :]
         )
         if self.config["trainer"]["wandb_log"]:
             wandb.log({"psnr": avg_psnr})

@@ -9,8 +9,9 @@ from src.dataset.data_set_seq_scene import RobotDatasetSeqScene, collate_fn
 from src.dataset.data_set_bridge import BridgeDataset
 from src.models.diffusion_frame_pred import (
     DiTActionSeqISim,
+    LinearDiTActionSeqISim,
     DiTActionSeqFrameAtt,
-    DiTActionSeqFrameMultAtt,
+    DiTActionSeqJoint,
 )
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq
@@ -31,6 +32,22 @@ from diffusers.optimization import get_scheduler
 from diffusers.schedulers import PNDMScheduler
 from .pipelines_video_gen import Trajectory2VideoGenPipeline
 
+
+def model_factory(model_config):
+    model_classes = {
+        "DiTActionSeqISim": DiTActionSeqISim,
+        "LinearDiTActionSeqISim": LinearDiTActionSeqISim,
+        "DiTActionSeqFrameAtt": DiTActionSeqFrameAtt,
+        "DiTActionSeqJoint": DiTActionSeqJoint,
+    }
+    type = model_config["type"]
+    if type not in model_classes:
+        raise ValueError(f"Unknown model type: {type}")
+
+    model_class = model_classes[type]
+    return model_class(model_config)
+
+
 class DiTTrainerScene(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
@@ -48,7 +65,8 @@ class DiTTrainerScene(TrainerBase):
         self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = DiTActionSeqISim(model_config)
+        # self.model_dit = DiTActionSeqISim(model_config)
+        self.model_dit = model_factory(model_config)
 
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
@@ -80,21 +98,21 @@ class DiTTrainerScene(TrainerBase):
                 NormalizeVideo(),
                 # transforms.RandomHorizontalFlip(),
                 transforms.Resize((self.image_size, self.image_size)),
-                #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
         # Load dataset
-        # self.dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
-        #     transform=transform,
-        #     seq_l=model_config["seq_len"],
-        # )
-        self.dataset = BridgeDataset(
-            json_dir=self.data_path,
+        self.dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
             transform=transform,
-            sequence_length=model_config["seq_len"]
+            seq_l=model_config["seq_len"],
         )
+        # self.dataset = BridgeDataset(
+        #     json_dir=self.data_path,
+        #     transform=transform,
+        #     sequence_length=model_config["seq_len"],
+        # )
 
         self.sampler = DistributedSampler(
             self.dataset,
@@ -114,18 +132,18 @@ class DiTTrainerScene(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-        self.val_dataset = BridgeDataset(
-            json_dir=self.data_path,
-            transform=transform,
-            sequence_length=model_config["seq_len"]
-        )
-        # RobotDatasetSeqScene(
-        #     data_path=self.data_path,
+        # self.val_dataset = BridgeDataset(
+        #     json_dir=self.data_path,
         #     transform=transform,
-        #     seq_l=model_config["seq_len"],
+        #     sequence_length=model_config["seq_len"],
         # )
+        self.val_dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
+            transform=transform,
+            seq_l=model_config["seq_len"],
+        )
         self.val_loader = (
-            DataLoader(self.val_dataset, batch_size=32, shuffle=False)
+            DataLoader(self.val_dataset, batch_size=16, shuffle=False)
             if self.val_dataset is not None
             else None
         )
@@ -261,7 +279,9 @@ class DiTTrainerScene(TrainerBase):
         self.model_ddp.eval()
         running_loss = 0.0
         with torch.no_grad():
-            for next_seq, action in tqdm(self.val_loader, desc="Validation"):
+            for step_val, (next_seq, action) in enumerate(
+                tqdm(self.val_loader, desc="Validation")
+            ):
                 next_seq, action = (
                     next_seq.to(self.device, dtype=torch.float32),
                     action.to(self.device, dtype=torch.float32),
@@ -283,7 +303,8 @@ class DiTTrainerScene(TrainerBase):
         dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
         running_loss = running_loss.item() / dist.get_world_size()
         self.model_ddp.train()
-        return running_loss / len(self.val_loader.dataset)
+        print(f"step_val: {step_val} ")
+        return running_loss / step_val
 
     def validate_video_generation(self, step):
         batch_id = list(range(0, len(self.val_dataset), int(len(self.val_dataset) / 3)))
@@ -325,13 +346,7 @@ class DiTTrainerScene(TrainerBase):
             device=self.device,
             output_type="both",
         )
-        # videos = (
-        #     ((videos / 2.0 + 0.5).clamp(0, 1) * 255)
-        #     .detach()
-        #     .to(dtype=torch.uint8)
-        #     .cpu()
-        #     .contiguous()
-        # )
+        # videos = (videos / 2.0 + 0.5).clamp(0, 1)
         # true_video = (
         #     ((true_video / 2.0 + 0.5).clamp(0, 1) * 255)
         #     .detach()
@@ -352,27 +367,33 @@ class DiTTrainerScene(TrainerBase):
             ],
             dim=1,
         )
+        avg_psnr, avg_ssim, avg_fid = self.metrics.evaluate_video(videos, true_video)
         # videos = rearrange(videos, "b f c h w -> (b f) c h w")
         videos = rearrange(videos, "b f c h w -> (b f) c h w")
         true_video = rearrange(true_video, "b f c h w -> (b f) c h w")
-        avg_psnr, avg_ssim = self.metrics.evaluate_video(videos, true_video)
-        print(f"psnr: {avg_psnr}  ssim: {avg_ssim}")
+
+        print(
+            "\n------------------------|| Metrics Validation ||--------------------------------"
+        )
+        print(f" || psnr: {avg_psnr}  ssim: {avg_ssim}  fid: {avg_fid} ||")
         if self.config["trainer"]["wandb_log"]:
             wandb.log({"psnr": avg_psnr})
             wandb.log({"ssim": avg_ssim})
+            wandb.log({"fid": avg_fid})
+
         save_image(
             videos,
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
-            normalize=False,
-            #value_range=(-1, 1),
+            normalize=True,
+            # value_range=(-1, 1),
         )
         save_image(
             true_video,
             self.eval_save_real_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
-            normalize=False,
-            #value_range=(-1, 1),
+            normalize=True,
+            # value_range=(-1, 1),
         )
 
     def _save_checkpoint(self, step):
