@@ -103,16 +103,16 @@ class DiTTrainerScene(TrainerBase):
         )
 
         # Load dataset
-        # self.dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
-        #     transform=transform,
-        #     seq_l=model_config["seq_len"],
-        # )
-        self.dataset = BridgeDataset(
-            json_dir=self.data_path,
+        self.dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
             transform=transform,
-            sequence_length=model_config["seq_len"],
+            seq_l=model_config["seq_len"],
         )
+        # self.dataset = BridgeDataset(
+        #     json_dir=self.data_path,
+        #     transform=transform,
+        #     sequence_length=model_config["seq_len"],
+        # )
 
         self.sampler = DistributedSampler(
             self.dataset,
@@ -132,16 +132,16 @@ class DiTTrainerScene(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-        self.val_dataset = BridgeDataset(
-            json_dir=self.data_path,
-            transform=transform,
-            sequence_length=model_config["seq_len"],
-        )
-        # self.val_dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
+        # self.val_dataset = BridgeDataset(
+        #     json_dir=self.data_path,
         #     transform=transform,
-        #     seq_l=model_config["seq_len"],
+        #     sequence_length=model_config["seq_len"],
         # )
+        self.val_dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
+            transform=transform,
+            seq_l=model_config["seq_len"],
+        )
         self.val_loader = (
             DataLoader(self.val_dataset, batch_size=16, shuffle=False)
             if self.val_dataset is not None
@@ -385,14 +385,14 @@ class DiTTrainerScene(TrainerBase):
             videos,
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
-            normalize=False,
+            normalize=True,
             # value_range=(-1, 1),
         )
         save_image(
             true_video,
             self.eval_save_real_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
-            normalize=False,
+            normalize=True,
             # value_range=(-1, 1),
         )
 
