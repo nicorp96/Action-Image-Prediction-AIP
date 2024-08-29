@@ -92,22 +92,23 @@ class DiTTrainerScene(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
+                NormalizeVideo(),
                 transforms.Resize((self.image_size, self.image_size)),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
         # Load dataset
-        # self.dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
-        #     transform=transform,
-        #     seq_l=model_config["seq_len"],
-        # )
-        self.dataset = BridgeDataset(
-            json_dir=self.data_path,
+        self.dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
             transform=transform,
-            sequence_length=model_config["seq_len"],
+            seq_l=model_config["seq_len"],
         )
+        # self.dataset = BridgeDataset(
+        #     json_dir=self.data_path,
+        #     transform=transform,
+        #     sequence_length=model_config["seq_len"],
+        # )
 
         self.data_loader = DataLoader(
             self.dataset,
@@ -117,16 +118,16 @@ class DiTTrainerScene(TrainerBase):
             pin_memory=True,
             drop_last=True,
         )
-        # self.val_dataset = RobotDatasetSeqScene(
-        #     data_path=self.data_path,
-        #     transform=transform,
-        #     seq_l=model_config["seq_len"],
-        # )
-        self.val_dataset = BridgeDataset(
-            json_dir=self.data_path,
+        self.val_dataset = RobotDatasetSeqScene(
+            data_path=self.data_path,
             transform=transform,
-            sequence_length=model_config["seq_len"],
+            seq_l=model_config["seq_len"],
         )
+        # self.val_dataset = BridgeDataset(
+        #     json_dir=self.data_path,
+        #     transform=transform,
+        #     sequence_length=model_config["seq_len"],
+        # )
         if self.val_dataset is not None:
             self.val_loader = DataLoader(self.val_dataset, batch_size=32, shuffle=False)
         else:
@@ -365,7 +366,7 @@ class DiTTrainerScene(TrainerBase):
                 self.eval_save_gen_dir + f"_{step}.png",
                 nrow=self.config["model"]["seq_len"],
                 normalize=True,
-                #value_range=(-1, 1),
+                # value_range=(-1, 1),
             )
             save_image(
                 true_video,

@@ -296,7 +296,7 @@ class ConditionEmbedding(nn.Module):
         )
         self.conv4 = nn.Conv2d(
             in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
-        )  
+        )
         self.max_pol = nn.MaxPool2d(4, 2)
 
         # ReLU activation
@@ -350,7 +350,9 @@ class DiTActionSeqISimMultiCondi(DiTActionSeq):
         t = self.t_embedder(t)  # (N, D)
         c_m = rearrange(c_m, "b l c w h-> (b l) c w h")  # [32*2, 3, 64, 64]
         canny_emb = self.condition_emb(c_m)
+
         canny_emb = canny_emb.flatten()
+
         canny_emb = rearrange(canny_emb, "(b h) -> b h", b=a.shape[0])
         timestep_spatial = repeat(t, "n d -> (n c) d", c=l)
         timestep_temp = repeat(t, "n d -> (n c) d", c=self.pos_embed.shape[1])
