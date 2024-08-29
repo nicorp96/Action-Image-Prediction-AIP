@@ -1,7 +1,7 @@
 trainer:
   batch_size: 64
   global_seed: 0
-  image_size: 128
+  image_size: 64
   n_epochs: 150001
   data_path: "ds_bridge/training/annotation"
   eval_save_real: "results/Bridge/DiTTrainerScene/real/epoch"

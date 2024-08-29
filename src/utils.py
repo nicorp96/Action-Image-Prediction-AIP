@@ -11,8 +11,15 @@ def update_ema(ema_model, model, decay=0.9999):
     model_params = OrderedDict(model.named_parameters())
 
     for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+        if name in ema_params:
+            ema_param = ema_params[name]
+            # Ensure tensors are on the same device
+            if ema_param.device != param.device:
+                ema_param = ema_param.to(param.device)
+            # Update EMA parameters
+            ema_param.data.mul_(decay).add_(param.data, alpha=1 - decay)
+        else:
+            print(f"Parameter {name} not found in EMA model.")
 
 
 def requires_grad(model, flag=True):
