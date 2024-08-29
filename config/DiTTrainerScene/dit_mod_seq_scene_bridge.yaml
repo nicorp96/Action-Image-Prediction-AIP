@@ -15,7 +15,7 @@ trainer:
   gradient_accumulation_steps: 1
 
 model:
-  type: "DiT"
+  type: "LinearDiTActionSeqISim" #DiTActionSeqISim, DiTActionSeqFrameAtt, LinearDiTActionSeqISim, DiTActionSeqJoint
   input_size: 16
   patch_size: 2
   in_channels: 4
