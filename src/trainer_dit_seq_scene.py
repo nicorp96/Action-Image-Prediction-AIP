@@ -98,10 +98,15 @@ class DiTTrainerScene(TrainerBase):
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
+        # self.dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
+        #     transform=transform,
+        #     seq_l=model_config["seq_len"],
+        # )
+        self.dataset = BridgeDataset(
+            json_dir=self.data_path,
             transform=transform,
-            seq_l=model_config["seq_len"],
+            sequence_length=model_config["seq_len"],
         )
 
         self.data_loader = DataLoader(
@@ -112,18 +117,23 @@ class DiTTrainerScene(TrainerBase):
             pin_memory=True,
             drop_last=True,
         )
-        self.val_dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
+        # self.val_dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
+        #     transform=transform,
+        #     seq_l=model_config["seq_len"],
+        # )
+        self.val_dataset = BridgeDataset(
+            json_dir=self.data_path,
             transform=transform,
-            seq_l=model_config["seq_len"],
+            sequence_length=model_config["seq_len"],
         )
         if self.val_dataset is not None:
-            self.val_loader = DataLoader(self.val_dataset, batch_size=16, shuffle=False)
+            self.val_loader = DataLoader(self.val_dataset, batch_size=32, shuffle=False)
         else:
             self.val_loader = None
 
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.AdamW(
             self.model_dit.parameters(),
             lr=self.config["trainer"]["learning_rate"],
             weight_decay=self.config["trainer"]["weight_decay"],
@@ -187,11 +197,11 @@ class DiTTrainerScene(TrainerBase):
                 and step % self.config["trainer"]["val_num"] == 0
             ):
                 val_loss = self._validate()
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    self._save_checkpoint(step)
                 if step % self.config["trainer"]["val_num_gen"] == 0:
                     self.validate_video_generation(step)
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        self._save_checkpoint(step)
 
             print(
                 f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
@@ -355,7 +365,7 @@ class DiTTrainerScene(TrainerBase):
                 self.eval_save_gen_dir + f"_{step}.png",
                 nrow=self.config["model"]["seq_len"],
                 normalize=True,
-                value_range=(-1, 1),
+                #value_range=(-1, 1),
             )
             save_image(
                 true_video,

@@ -125,14 +125,14 @@ class DiTTrainerSceneMC(TrainerBase):
             drop_last=True,
             # collate_fn=collate_fn,
         )
-        self.val_dataset =  BridgeDatasetMC(
+        self.val_dataset = BridgeDatasetMC(
             json_dir=self.data_path,
             transform=transform,
             sequence_length=model_config["seq_len"],
         )
         self.val_loader = (
             DataLoader(self.val_dataset, batch_size=64, shuffle=False)
-            if self.val_dataset 
+            if self.val_dataset
             else None
         )
         self.criterion = nn.MSELoss()
@@ -209,11 +209,11 @@ class DiTTrainerSceneMC(TrainerBase):
             if self.val_loader is not None:
                 if step % self.config["trainer"]["val_num"] == 0:
                     val_loss = self._validate()
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.validate_video_generation(step)
                     if val_loss < best_loss:
                         best_loss = val_loss
                         self._save_checkpoint(step)
-                if step % self.config["trainer"]["val_num_gen"] == 0:
-                    self.validate_video_generation(step)
 
             print(
                 f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
