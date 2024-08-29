@@ -79,7 +79,9 @@ class DiTTrainerScene(TrainerBase):
             self.device
         )  # Create an EMA of the model for use after training
         requires_grad(self.ema, False)
-        self.model_ddp = DDP(self.model_dit.to(self.device), device_ids=[self.rank])
+        self.model_ddp = torch.compile(
+            DDP(self.model_dit.to(self.device), device_ids=[self.rank])
+        )
 
         self.diffusion_s = create_diffusion_seq(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"],
@@ -95,10 +97,10 @@ class DiTTrainerScene(TrainerBase):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                NormalizeVideo(),
+                # NormalizeVideo(),
                 # transforms.RandomHorizontalFlip(),
                 transforms.Resize((self.image_size, self.image_size)),
-                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
 
@@ -386,7 +388,7 @@ class DiTTrainerScene(TrainerBase):
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
             normalize=True,
-            # value_range=(-1, 1),
+            value_range=(-1, 1),
         )
         save_image(
             true_video,

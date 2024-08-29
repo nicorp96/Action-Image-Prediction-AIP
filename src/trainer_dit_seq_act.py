@@ -76,7 +76,7 @@ class DiTTrainerActScene(TrainerBase):
             [
                 transforms.ToTensor(),
                 transforms.RandomHorizontalFlip(),
-                transforms.Resize(self.image_size),
+                transforms.Resize((self.image_size, self.image_size)),
                 # transforms.CenterCrop(self.image_size),
                 # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
