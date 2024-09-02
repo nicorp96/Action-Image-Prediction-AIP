@@ -99,16 +99,16 @@ class DiTTrainerScene(TrainerBase):
         )
 
         # Load dataset
-        self.dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
-            transform=transform,
-            seq_l=model_config["seq_len"],
-        )
-        # self.dataset = BridgeDataset(
-        #     json_dir=self.data_path,
+        # self.dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
         #     transform=transform,
-        #     sequence_length=model_config["seq_len"],
+        #     seq_l=model_config["seq_len"],
         # )
+        self.dataset = BridgeDataset(
+            json_dir=self.data_path,
+            transform=transform,
+            sequence_length=model_config["seq_len"],
+        )
 
         self.data_loader = DataLoader(
             self.dataset,
@@ -118,18 +118,18 @@ class DiTTrainerScene(TrainerBase):
             pin_memory=True,
             drop_last=True,
         )
-        self.val_dataset = RobotDatasetSeqScene(
-            data_path=self.data_path,
-            transform=transform,
-            seq_l=model_config["seq_len"],
-        )
-        # self.val_dataset = BridgeDataset(
-        #     json_dir=self.data_path,
+        # self.val_dataset = RobotDatasetSeqScene(
+        #     data_path=self.data_path,
         #     transform=transform,
-        #     sequence_length=model_config["seq_len"],
+        #     seq_l=model_config["seq_len"],
         # )
+        self.val_dataset = BridgeDataset(
+            json_dir=self.data_path,
+            transform=transform,
+            sequence_length=model_config["seq_len"],
+        )
         if self.val_dataset is not None:
-            self.val_loader = DataLoader(self.val_dataset, batch_size=32, shuffle=False)
+            self.val_loader = DataLoader(self.val_dataset, batch_size=64, shuffle=False)
         else:
             self.val_loader = None
 
@@ -152,8 +152,9 @@ class DiTTrainerScene(TrainerBase):
             self.optimizer,
             self.data_loader,
             self.lr_scheduler,
+            self.val_loader,
         ) = self.accelerator.prepare(
-            self.model_dit, self.optimizer, self.data_loader, self.lr_scheduler
+            self.model_dit, self.optimizer, self.data_loader, self.lr_scheduler, self.val_loader
         )
         self.vae = self.vae.to(device=self.accelerator.device)
         self.ema = deepcopy(self.model_dit)  # EMA without .to(self.device)
@@ -260,8 +261,8 @@ class DiTTrainerScene(TrainerBase):
                 tqdm(self.val_loader, desc="Validation")
             ):
                 next_seq, action = (
-                    next_seq.to(self.accelerator.device, dtype=torch.float32),
-                    action.to(self.accelerator.device, dtype=torch.float32),
+                    next_seq.to(device=self.accelerator.device, dtype=torch.float32),
+                    action.to(device=self.accelerator.device,dtype=torch.float32),
                 )
                 b, _, _, _, _ = next_seq.shape
                 x = rearrange(next_seq, "b f c h w -> (b f) c h w").contiguous()
@@ -279,7 +280,6 @@ class DiTTrainerScene(TrainerBase):
                 )
                 loss = loss_dict["loss"].mean()
                 running_loss += loss.item()
-
         return running_loss / (step_val + 1)
 
     def validate_video_generation(self, step):
@@ -366,7 +366,7 @@ class DiTTrainerScene(TrainerBase):
                 self.eval_save_gen_dir + f"_{step}.png",
                 nrow=self.config["model"]["seq_len"],
                 normalize=True,
-                # value_range=(-1, 1),
+                value_range=(0, 1),
             )
             save_image(
                 true_video,

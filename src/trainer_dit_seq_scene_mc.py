@@ -381,7 +381,7 @@ class DiTTrainerSceneMC(TrainerBase):
             self.eval_save_gen_dir + f"_{step}.png",
             nrow=self.config["model"]["seq_len"],
             normalize=True,
-            # value_range=(-1, 1),
+            value_range=(0, 1),
         )
         save_image(
             true_video,

@@ -23,7 +23,7 @@ class VideoMetrics:
 
     def fid(self, frame1, frame2):
         frame1 = (((frame1 + 1) * 0.5) * 255).to(torch.uint8)
-        frame2 = (((frame2 + 1) * 0.5) * 255).to(torch.uint8)
+        frame2 = (frame2 * 255).to(torch.uint8)
         self._fid.update(frame2, real=True)
         self._fid.update(frame1, real=False)
         result = self._fid.compute()

@@ -290,13 +290,13 @@ class ConditionEmbedding(nn.Module):
         # Define the convolutional layers
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=4, stride=2)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
-        self.conv4 = nn.Conv2d(
-            in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
-        )
-        self.conv4 = nn.Conv2d(
-            in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
-        )
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=out_dim, kernel_size=4, stride=2)
+        # self.conv4 = nn.Conv2d(
+        #     in_channels=64, out_channels=out_dim, kernel_size=2, stride=2
+        # )
+        # self.conv4 = nn.Conv2d(
+        #     in_channels=64, out_channels=out_dim, kernel_size=4, stride=2
+        # )
         self.max_pol = nn.MaxPool2d(4, 2)
 
         # ReLU activation
@@ -316,7 +316,7 @@ class ConditionEmbedding(nn.Module):
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
         x = self.relu(self.conv3(x))
-        x = self.relu(self.conv4(x))
+        #x = self.relu(self.conv4(x))
         x = self.max_pol(x)
         return x
 
