@@ -36,6 +36,24 @@ class FinalLayer(nn.Module):
         return x
 
 
+class MLPAttentionPooling(nn.Module):
+    def __init__(self, hidden_dim, in_channels, out_channels):
+        super(MLPAttentionPooling, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Conv2d(in_channels, out_channels, kernel_size=2, stride=2),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, x):
+        # x: (batch_size, seq_len, hidden_dim)
+        scores = self.mlp(x)  # Shape: (batch_size, seq_len, 1)
+        weights = torch.softmax(scores, dim=1)  # Normalize across sequence dimension
+        pooled_output = torch.sum(weights * x, dim=1)  # Weighted sum across tokens
+        return pooled_output
+
+
 class DiTActionSeqAct(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -342,15 +360,21 @@ class DiTActionFramesSeq3(DiTActionSeqAct):
             torch.zeros(1, self.seq_len, self.hidden_size), requires_grad=False
         )
 
-        self.last_block = DiTBlock(
-            self.hidden_size,
-            self.num_heads,
-            mlp_ratio=self.mlp_ratio,
-            attention_mode="math",
+        self.blocks_mh = nn.ModuleList(
+            [
+                DiTBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    attention_mode="math",
+                )
+                for _ in range(4)
+            ]
         )
 
-        nn.init.constant_(self.last_block.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.last_block.adaLN_modulation[-1].bias, 0)
+        for block in self.blocks_mh:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         temp_embed = get_1d_sincos_temp_embed(
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
@@ -363,11 +387,21 @@ class DiTActionFramesSeq3(DiTActionSeqAct):
         self.pos_embed_act.data.copy_(
             torch.from_numpy(pos_embed_act).float().unsqueeze(0)
         )
-        self.img_c_embedder = nn.Linear(256, self.hidden_size)
+        # self.img_c_embedder = nn.Linear(256, self.hidden_size)
+        self.img_c_embedder = nn.Sequential(
+            nn.Linear(256, self.hidden_size * 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size * 2, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+        )
         self.final_layer_act = FinalLayer(
             self.hidden_size, self.seq_len + 1, self.action_dim
         )
-        self.downsample_layer = nn.Linear(847, 7)
+        self.downsample_layer = nn.Sequential(
+            nn.LayerNorm(847),
+            nn.Sigmoid(),
+            nn.Linear(847, 7),
+        )
 
         nn.init.normal_(self.a_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.a_embedder.mlp[2].weight, std=0.02)
@@ -376,7 +410,7 @@ class DiTActionFramesSeq3(DiTActionSeqAct):
         nn.init.constant_(self.final_layer_act.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer_act.linear.weight, 0)
         nn.init.constant_(self.final_layer_act.linear.bias, 0)
-        nn.init.normal_(self.downsample_layer.weight, std=0.02)
+        nn.init.normal_(self.downsample_layer[2].weight, std=0.02)
 
     def forward(self, x, t, a, img_c, mask_frame_num=None):
         """
@@ -402,21 +436,33 @@ class DiTActionFramesSeq3(DiTActionSeqAct):
         y_feat = img_c.flatten(start_dim=1)
         y_emb = self.img_c_embedder(y_feat)
 
+        c = timestep_spatial + y_emb
+        x = self.blocks_mh[0](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        x = x + self.temp_embed[:, 0:l]
+        c = timestep_temp
+        x = self.blocks_mh[1](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
         for i in range(0, len(self.blocks), 2):
             c = timestep_spatial + y_emb
             spatial_block, temp_block = self.blocks[i : i + 2]
             x = spatial_block(x, c)
             x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
-            # Add Time Embedding
-            if i == 0:
-                x = x + self.temp_embed[:, 0:l]
+            # # Add Time Embedding
+            # if i == 0:
+            #     x = x + self.temp_embed[:, 0:l]
             c = timestep_temp
             x = temp_block(x, c)
             x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
-
         c = timestep_spatial + y_emb
-        x = self.last_block(x, c)
-        x_act = self.final_layer_act(x[:, 15:16, :], c)
+        x = self.blocks_mh[2](x, c)
+        x = rearrange(x, "(b f) t d -> (b t) f d", b=batch_sz)
+        x = x + self.temp_embed[:, 0:l]
+        c = timestep_temp
+        x = self.blocks_mh[3](x, c)
+        x = rearrange(x, "(b t) f d -> (b f) t d", b=batch_sz)
+        c = timestep_spatial + y_emb
+        x_act = self.final_layer_act(x[:, -1:, :], c)
         x_act = torch.einsum("nhw->nhw", x_act)
         x_act = x_act.view((batch_sz, l, -1))  # torch.Size([32, 16, 7])
         x_act = self.downsample_layer(x_act)
@@ -448,7 +494,6 @@ class DiTActionFramesSeq4(DiTActionSeqAct):
             mlp_ratio=self.mlp_ratio,
             attention_mode="math",
         )
-
         temp_embed = get_1d_sincos_temp_embed(
             self.temp_embed.shape[-1], self.temp_embed.shape[-2]
         )

@@ -24,7 +24,7 @@ for config_file in "${yaml_files[@]}"; do
     # Extract the base name of the file (without path)
     config_filename=$(basename "$config_file")
     echo "Processing $config_file..."
-    python3 -m torch.distributed.launch run_training_diff.py -c "$config_file" -t "$DEFAULT_TRAINER"
+    accelerate launch --num_processes=1 --num_machines=1 --mixed_precision=no --dynamo_backend=inductor run_training_diff.py -c "$config_file" -t "$DEFAULT_TRAINER"
 done
 
 echo "Finished Training"

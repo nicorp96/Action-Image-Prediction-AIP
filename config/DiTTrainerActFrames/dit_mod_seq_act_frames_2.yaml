@@ -1,5 +1,5 @@
 trainer:
-  batch_size: 32
+  batch_size: 64
   global_seed: 0
   image_size: 64
   n_epochs: 90001

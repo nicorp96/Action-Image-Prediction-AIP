@@ -2,8 +2,6 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from src.dataset.data_set_seq_trj import RobotDatasetSeqTrj
@@ -18,7 +16,6 @@ from src.models.diffusion_transformer_action import (
 from copy import deepcopy
 from src.models.difussion_utils.schedule import create_diffusion_seq_act
 from diffusers.models import AutoencoderKL
-from torch.utils.data.distributed import DistributedSampler
 from src.trainer_base import TrainerBase
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
@@ -33,6 +30,7 @@ import os
 from .utils import update_ema, requires_grad
 from diffusers.schedulers import PNDMScheduler
 from .pipelines_video_gen import VideoGenTrajectoryPipeline
+from accelerate import Accelerator
 
 
 def model_factory(model_config):
@@ -56,6 +54,7 @@ class DiTTrainerActFrames(TrainerBase):
     def __init__(self, config_dir, val_dataset=None):
         super().__init__(config_dir)
         self.__load_config__()
+        self.accelerator = Accelerator()
         if self.config["trainer"]["wandb_log"]:
             wandb.init()
         # Trainer settings
@@ -67,11 +66,9 @@ class DiTTrainerActFrames(TrainerBase):
         self.data_path = os.path.join(base, self.config["trainer"]["data_path"])
         self.val_data_path = os.path.join(base, self.config["trainer"]["val_data_path"])
         self.cuda_num = self.config["trainer"]["cuda_num"]
-
-        self.__setup__DDP(self.config["distributed"])
         # Model settings
         model_config = self.config["model"]
-        self.model_dit = model_factory(model_config)
+        self.model_dit = torch.compile(model_factory(model_config))
         self.eval_save_real_dir = os.path.join(
             base, self.config["trainer"]["eval_save_real"]
         )
@@ -85,15 +82,6 @@ class DiTTrainerActFrames(TrainerBase):
             base, self.config["trainer"]["action_save_real"]
         )
         self.mask_num = model_config["mask_n"]
-        self.ema = deepcopy(self.model_dit).to(
-            self.device
-        )  # Create an EMA of the model for use after training
-        requires_grad(self.ema, False)
-        self.model_ddp = DDP(
-            self.model_dit.to(self.device),
-            device_ids=[self.rank],
-            # find_unused_parameters=True,
-        )
 
         self.diffusion_s = create_diffusion_seq_act(
             timestep_respacing=self.config["diffusion"]["timestep_respacing"],
@@ -104,8 +92,8 @@ class DiTTrainerActFrames(TrainerBase):
         vae_config = self.config["vae"]
         self.vae = AutoencoderKL.from_pretrained(
             vae_config["path"], subfolder=vae_config["subfolder"]
-        ).to(self.device)
-        self.metrics = VideoMetrics(device=self.device, vae=self.vae)
+        ).to(self.accelerator.device)
+        self.metrics = VideoMetrics(device=self.accelerator.device, vae=self.vae)
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -125,20 +113,11 @@ class DiTTrainerActFrames(TrainerBase):
             transform=transform,
             seq_l=model_config["seq_len"],
         )
-        self.sampler = DistributedSampler(
-            self.dataset,
-            num_replicas=dist.get_world_size(),
-            rank=self.rank,
-            shuffle=True,
-            seed=self.global_seed,
-        )
-
         self.data_loader = DataLoader(
             self.dataset,
-            batch_size=int(self.batch_size // dist.get_world_size()),
+            batch_size=self.batch_size,
             shuffle=False,
-            sampler=self.sampler,
-            num_workers=2,
+            num_workers=4,
             pin_memory=True,
             drop_last=True,
             # collate_fn=collate_fn,
@@ -152,7 +131,7 @@ class DiTTrainerActFrames(TrainerBase):
 
         self.criterion = nn.MSELoss()
         self.optimizer = optim.AdamW(
-            self.model_ddp.parameters(),
+            self.model_dit.parameters(),
             lr=self.config["trainer"]["learning_rate"],
             weight_decay=self.config["trainer"]["weight_decay"],
         )
@@ -162,6 +141,21 @@ class DiTTrainerActFrames(TrainerBase):
             num_training_steps=self.n_epochs
             * self.config["trainer"]["gradient_accumulation_steps"],
         )
+        (
+            self.model_dit,
+            self.optimizer,
+            self.data_loader,
+            self.lr_scheduler,
+            self.val_loader,
+        ) = self.accelerator.prepare(
+            self.model_dit,
+            self.optimizer,
+            self.data_loader,
+            self.lr_scheduler,
+            self.val_loader,
+        )
+        self.ema = deepcopy(self.model_dit).to(self.accelerator.device)
+        requires_grad(self.ema, False)
         self.scheduler = None
         if self.config["diffusion"]["sample_method"] == "PNDM":
             self.scheduler = PNDMScheduler.from_pretrained(
@@ -179,71 +173,52 @@ class DiTTrainerActFrames(TrainerBase):
                 beta_schedule=self.config["diffusion"]["beta_schedule"],
                 variance_type=self.config["diffusion"]["variance_type"],
             )
+        self.log_vars = nn.Parameter(torch.zeros((2), device=self.accelerator.device))
 
     def __load_config__(self):
         # Load config
         with open(self.config_dir, "r") as file:
             self.config = yaml.safe_load(file)
 
-    def __setup__DDP(self, distributed_config):
-        assert (
-            torch.cuda.is_available()
-        ), "Training currently requires at least one GPU."
-
-        dist.init_process_group(distributed_config["backend"])
-        assert (
-            self.batch_size % dist.get_world_size() == 0
-        ), f"Batch size must be divisible by the world size."
-        self.rank = dist.get_rank()
-        self.device = torch.device(
-            self.rank % torch.cuda.device_count()
-        )  # self.cuda_num
-        self.seed = self.global_seed * dist.get_world_size() + self.rank
-        torch.manual_seed(self.seed)
-        torch.cuda.set_device(self.device)
-        print(
-            f"Starting rank={self.rank}, seed={self.seed}, world_size={dist.get_world_size()}."
-        )
-
     def train(self):
         # Prepare models for training:
         update_ema(
-            self.ema, self.model_ddp.module, decay=0
+            self.ema, self.model_dit
         )  # Ensure EMA is initialized with synced weights
-        self.model_ddp.train()  # important! This enables embedding dropout for classifier-free guidance
+        self.model_dit.train()  # important! This enables embedding dropout for classifier-free guidance
         self.ema.eval()  # EMA model should always be in eval mode
         best_loss = float("inf")
         step = 0
         val_loss = None
         for epoch in range(self.n_epochs):
-            self.sampler.set_epoch(epoch)
             train_loss = self._train_one_epoch(step)
-            if self.val_loader is not None:
-                if step % self.config["trainer"]["val_num"] == 0:
-                    val_loss = self._validate(step)
+            if (
+                self.val_loader is not None
+                and step % self.config["trainer"]["val_num"] == 0
+            ):
+                val_loss = self._validate()
+                if step % self.config["trainer"]["val_num_gen"] == 0:
+                    self.validate_video_generation(step)
                     if val_loss < best_loss:
                         best_loss = val_loss
                         self._save_checkpoint(step)
-                if step % self.config["trainer"]["val_num_gen"] == 0:
-                    self.validate_video_generation(step)
             print(
                 f"(Epoch={epoch:04d}) Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}"
             )
             step += 1
 
-        self.model_ddp.eval()
+        self.model_dit.eval()
         self._save_checkpoint(step)
-        dist.destroy_process_group()
         print("Training finished.")
 
     def _train_one_epoch(self, step):
-        self.model_ddp.train()
+        self.model_dit.train()
         running_loss = 0.0
         for goal_img, next_seq, action in tqdm(self.data_loader, desc="Training"):
             goal_img, next_seq, action = (
-                goal_img.to(device=self.device, dtype=torch.float32),
-                next_seq.to(self.device, dtype=torch.float32),
-                action.to(self.device, dtype=torch.float32),
+                goal_img.to(dtype=torch.float32),
+                next_seq.to(dtype=torch.float32),
+                action.to(dtype=torch.float32),
             )
 
             with torch.no_grad():
@@ -258,38 +233,50 @@ class DiTTrainerActFrames(TrainerBase):
                 )
 
             t = torch.randint(
-                0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                0,
+                self.diffusion_s.num_timesteps,
+                (x.shape[0],),
+                device=self.accelerator.device,
             )
 
             model_kwargs = dict(a=action, img_c=goal_img, mask_frame_num=2)
             loss_dict = self.diffusion_s.training_losses(
-                self.model_ddp, x, t, model_kwargs
+                self.model_dit, x, t, model_kwargs
             )
             loss = loss_dict["loss"].mean()
             loss_act = loss_dict["loss_act"].mean()
             if self.config["trainer"]["wandb_log"]:
                 wandb.log({"loss": loss})
                 wandb.log({"loss_act": loss_act})
+                self.accelerator.log({"loss": loss})
+                self.accelerator.log({"loss_act": loss_act})
+
             total_loss = loss + loss_act
-            total_loss.backward()
+            if self.config["trainer"]["dynamic_weighting"]:
+                # Dynamic weighting based on uncertainty
+                precision_noise = torch.exp(-self.log_vars[0])
+                precision_action = torch.exp(-self.log_vars[1])
+                total_loss = loss * precision_noise + loss_act * precision_action
+
+            self.optimizer.zero_grad()
+            self.accelerator.backward(total_loss)
             self.optimizer.step()
             self.lr_scheduler.step()
-            self.optimizer.zero_grad()
-            update_ema(self.ema, self.model_ddp.module)
+            update_ema(self.ema, self.model_dit)
             running_loss += total_loss.item()
         return running_loss
 
-    def _validate(self, step):
-        self.model_ddp.eval()
+    def _validate(self):
+        self.model_dit.eval()
         running_loss = 0.0
         with torch.no_grad():
             for step_val, (goal_img, next_seq, action) in enumerate(
                 tqdm(self.val_loader, desc="Validation")
             ):
                 goal_img, next_seq, action = (
-                    goal_img.to(device=self.device, dtype=torch.float32),
-                    next_seq.to(self.device, dtype=torch.float32),
-                    action.to(self.device, dtype=torch.float32),
+                    goal_img.to(device=self.accelerator.device, dtype=torch.float32),
+                    next_seq.to(self.accelerator.device, dtype=torch.float32),
+                    action.to(self.accelerator.device, dtype=torch.float32),
                 )
 
                 b, _, _, _, _ = next_seq.shape
@@ -297,7 +284,10 @@ class DiTTrainerActFrames(TrainerBase):
                 x = self.vae.encode(x).latent_dist.sample().mul_(0.18215)
                 x = rearrange(x, "(b f) c h w -> b f c h w", b=b).contiguous()
                 t = torch.randint(
-                    0, self.diffusion_s.num_timesteps, (x.shape[0],), device=self.device
+                    0,
+                    self.diffusion_s.num_timesteps,
+                    (x.shape[0],),
+                    device=self.accelerator.device,
                 )
                 goal_img = (
                     self.vae.encode(goal_img[:1, :, :])
@@ -306,25 +296,25 @@ class DiTTrainerActFrames(TrainerBase):
                 )
                 model_kwargs = dict(a=action, img_c=goal_img, mask_frame_num=2)
                 loss_dict = self.diffusion_s.training_losses(
-                    self.model_ddp, x, t, model_kwargs
+                    self.model_dit, x, t, model_kwargs
                 )
                 loss = loss_dict["loss"].mean()
                 running_loss += loss
-        running_loss = running_loss.detach()
-        dist.all_reduce(running_loss, op=dist.ReduceOp.SUM)
-        running_loss = running_loss.item() / dist.get_world_size()
-        self.model_ddp.train()
         return running_loss / step_val
 
     def _save_checkpoint(self, step):
         checkpoint = {
-            "model": self.model_ddp.module.state_dict(),
+            "model": self.accelerator.unwrap_model(self.model_dit).state_dict(),
             "ema": self.ema.state_dict(),
             "opt": self.optimizer.state_dict(),
         }
         torch.save(checkpoint, f"checkpoints/frame_action_scene_epoch_{step}.pth")
 
     def validate_video_generation(self, step):
+        self.model_dit.eval()
+        self.vae.eval()
+
+        device = self.accelerator.device
         batch_id = list(range(0, len(self.val_dataset), int(len(self.val_dataset) / 3)))
 
         batch_list = [self.val_dataset.__getitem__(id) for id in batch_id]
@@ -334,14 +324,14 @@ class DiTTrainerActFrames(TrainerBase):
                 for i, (goal_img, video, action) in enumerate(batch_list)
             ],
             dim=0,
-        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        ).to(device, non_blocking=True, dtype=torch.float32)
         true_video = torch.cat(
             [
                 video.unsqueeze(0)
                 for i, (goal_img, video, action) in enumerate(batch_list)
             ],
             dim=0,
-        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        ).to(device, non_blocking=True, dtype=torch.float32)
 
         goal_image = torch.cat(
             [
@@ -349,7 +339,7 @@ class DiTTrainerActFrames(TrainerBase):
                 for i, (goal_img, video, action) in enumerate(batch_list)
             ],
             dim=0,
-        ).to(self.device, non_blocking=True, dtype=torch.float32)
+        ).to(device, non_blocking=True, dtype=torch.float32)
 
         mask_frame_num = self.mask_num
         mask_x = true_video[:, 0:mask_frame_num]
@@ -366,7 +356,9 @@ class DiTTrainerActFrames(TrainerBase):
                 self.vae.encode(goal_image[:1, :, :]).latent_dist.sample().mul_(0.18215)
             )
         videogen_pipeline = VideoGenTrajectoryPipeline(
-            vae=self.vae, scheduler=self.scheduler, transformer=self.ema
+            vae=self.vae,
+            scheduler=self.scheduler,
+            transformer=self.accelerator.unwrap_model(self.ema),
         )
         print("Generation total {} videos".format(mask_x.size()[0]))
         # actions = actions[:, :mask_frame_num, :]
@@ -379,7 +371,7 @@ class DiTTrainerActFrames(TrainerBase):
             width=self.image_size,
             num_inference_steps=self.config["diffusion"]["infer_num_sampling_steps"],
             guidance_scale=self.config["diffusion"]["guidance_scale"],  # dumpy
-            device=self.device,
+            device=device,
             output_type="both",
         )
         videos = (videos / 2.0 + 0.5).clamp(-1, 1)
